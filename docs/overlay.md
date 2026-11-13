@@ -199,6 +199,42 @@ There is no `--bind-key`: writing three desktops' key settings (kglobalaccel, CO
 Hyprland's Lua) from here risks clobbering the user's own bindings. Maprisma Manager's Voice page
 (step 2, "key and mode") will set it through the Launcher's existing shortcut code for each desktop.
 
+## The bar icon
+
+Family rule: every Maprisma app's bar icon toggles it. Both bar programs run the overlay's own
+`maprisma-dictation --toggle` (the one next to them, else `~/.local/bin`, else PATH), so the bar, a
+key and the Launcher take the same path (`src/bar.rs`).
+
+| | COSMIC | KDE Plasma 6 | Hyprland (Maprisma Shell) |
+|---|---|---|---|
+| Program | `maprisma-dictation-applet`, applet `io.github.ubruckhaus.CosmicMaprismaDictation` (add it in Settings › Desktop › Panel › Applets) | `maprisma-dictation-tray`, an SNI with Id `maprisma-dictation`, autostart `OnlyShowIn=KDE;Hyprland;` | the same tray, shown by the shell's tray (`tray:maprisma-dictation` in bar.json) |
+| Left click | open (and listen) / close | the same | the same |
+| Right click | a menu: Open/Close dictation, Voice settings… (`maprisma-manager --page voice`); Esc closes it | the same menu, plus Quit tray | the same as KDE |
+| Middle click | – | – | – |
+
+Its title starts with "Maprisma" in every language, so KDE's "Maprisma Icons" widget picks it up
+by itself. The icon shows, from the session bus only (nothing is started for it):
+
+| Icon | When |
+|---|---|
+| mic outline (`…Dictation-symbolic`) | idle |
+| filled mic (`-open-symbolic`) | the overlay is open (`com.maprisma.Dictation` has an owner) |
+| filled mic with sound arcs (`-listening-symbolic`) | maprisma-voice listens or transcribes (`State` signal; any app's session: the mic is on) |
+| filled mic with a dot (`-speaking-symbolic`) | an answer is read aloud (`Speaking`) |
+
+`Status` is asked only when the voice service already runs: at the start, when it appears, and
+every 15 s while the icon shows it busy. `Level` and `Partial` are not subscribed. The texts follow
+the overlay's `language` setting (re-read every 5 s).
+
+Checked live on Hyprland (4K, 2026-11-13) from a temporary prefix, the overlay on a headless
+output: the tray registers and shows in Maprisma Shell's bar (tooltip "Maprisma Dictation · Click
+to speak or type a question"); `Activate` opens the overlay (icon → open) and a second one closes
+it (icon → idle); `State`/`Speaking` signals switch the icon to listening / speaking and back.
+From a prefix outside the icon theme's path the shell drew a placeholder: the tray reports
+`IconThemePath`, but Quickshell 0.3.2 did not load `?path=` icons (and caches a failed name until
+it restarts); installed in `~/.local/share/icons` like the other Maprisma trays, the names resolve.
+The COSMIC applet builds but was not tried on a live COSMIC panel; KDE not live either.
+
 ## Desktops
 
 The overlay is a wlr-layer-shell surface (overlay layer, top anchor, 48 px below the top edge or a

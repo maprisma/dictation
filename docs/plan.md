@@ -17,7 +17,7 @@ The design is in [proposal.md](proposal.md). Each step gets its own branch and t
    - `--toggle`, `--hold`/`--release` (hold to talk on Hyprland; KDE and COSMIC toggle only), `--demo`.
    - Checked on Hyprland off-screen: the demo, and the real voice service end to end (private bus, fake recorder, fake whisper-server, fake helper).
    - Follow-ups:
-     - a panel applet (COSMIC) and tray icon (KDE, Hyprland) that toggle it, and a Maprisma Manager catalog entry;
+     - a panel applet (COSMIC) and tray icon (KDE, Hyprland) that toggle it: built on branch `bar-icon`, 2026-11-13 ([overlay.md](overlay.md#the-bar-icon)); the Manager's catalog entry declares it (maprisma-manager branch `dictation-bar-icon`);
      - the key binding from the Manager's Voice page (step 2);
      - check keyboard focus and typing live on KDE and COSMIC;
      - history of the last 25 sessions with a private mode;

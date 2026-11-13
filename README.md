@@ -12,6 +12,9 @@ One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hypr
   volume and media, and show the weather; closing windows and commands wait for Enter, and
   sudo, packages, deleting and secrets are never done ([Actions](docs/overlay.md#actions)).
   It can read answers aloud (`speak_answers`).
+- **The bar icon** toggles the overlay on every desktop ([docs/overlay.md](docs/overlay.md#the-bar-icon)):
+  a COSMIC panel applet (`maprisma-dictation-applet`) and a tray icon on KDE Plasma and Hyprland
+  (`maprisma-dictation-tray`). It shows when the microphone listens or an answer is read aloud.
 - **Coming next:**
   - the Voice settings in Maprisma Manager (with the action log);
   - a mic button on every Ask AI page.
@@ -21,7 +24,9 @@ One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hypr
 
 ```sh
 ./install.sh            # ~/.local/bin/maprisma-voice + systemd user unit + D-Bus activation,
-                        # ~/.local/bin/maprisma-dictation + its (hidden) launcher entry and icons
+                        # ~/.local/bin/maprisma-dictation + its (hidden) launcher entry and icons,
+                        # the bar icon: maprisma-dictation-applet (COSMIC), maprisma-dictation-tray
+                        # (KDE, Hyprland; XDG autostart) with their entries and icons
 ./install.sh --uninstall
 ```
 
