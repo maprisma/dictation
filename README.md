@@ -8,11 +8,13 @@ One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hypr
 - **`maprisma-dictation`** is the overlay: a pill at the top centre with an aura ring. Speak or type
   a question and the AI helper you chose in Maprisma Manager → AI answers. Bind a key to
   `maprisma-dictation --toggle` (details, hold-to-talk and the key per desktop: [docs/overlay.md](docs/overlay.md)).
-  It answers only for now; acting on the desktop is the next step.
+  It can also act: open apps and web pages, switch workspaces, light/dark, do not disturb,
+  volume and media, and show the weather; closing windows and commands wait for Enter, and
+  sudo, packages, deleting and secrets are never done ([Actions](docs/overlay.md#actions)).
+  It can read answers aloud (`speak_answers`).
 - **Coming next:**
-  - the Voice settings in Maprisma Manager;
-  - a mic button on every Ask AI page;
-  - desktop actions for the overlay (`maprisma-actions`).
+  - the Voice settings in Maprisma Manager (with the action log);
+  - a mic button on every Ask AI page.
   - See [docs/plan.md](docs/plan.md) and [docs/proposal.md](docs/proposal.md).
 
 ## Install
@@ -65,6 +67,7 @@ Apps use the D-Bus API: [docs/protocol.md](docs/protocol.md).
 ```sh
 maprisma-dictation --toggle         # the overlay: listen, then ask the AI helper (again: close)
 maprisma-dictation --demo           # try the look: made-up speech and answer
+maprisma-dictation --ask "open Firefox"   # ask at once, as if typed
 ```
 
 Measured on an RX 7900 XTX with large-v3-turbo, a 5.5 s sentence takes about 0.25–0.4 s, in German and English. The model takes about 850 MB of GPU memory and is unloaded after 10 idle minutes (`unload_minutes`).

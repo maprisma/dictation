@@ -20,8 +20,13 @@ The design is in [proposal.md](proposal.md). Each step gets its own branch and t
      - a panel applet (COSMIC) and tray icon (KDE, Hyprland) that toggle it, and a Maprisma Manager catalog entry;
      - the key binding from the Manager's Voice page (step 2);
      - check keyboard focus and typing live on KDE and COSMIC;
-     - history of the last 25 sessions with a private mode, Undo chips and confirmation cards (step 5), spoken answers (step 6);
+     - history of the last 25 sessions with a private mode;
      - compositor blur behind the pill; starting pi's local model servers for `pi:` helpers (the Launcher does that).
-5. **`maprisma-actions`:** typed tools at three levels (run, confirm with Enter, never), Undo, and a log in the Manager.
-6. **Spoken answers.** The service part is done, 2026-11-13: `Speak`/`StopSpeaking`, the `Speaking` signal and `maprisma-voice speak`. Checked live: Kokoro speaks two German sentences in 1.5 s, and Whisper transcribes them back word for word. Still to do: the overlay's "read answers aloud" option. Originally planned: `Speak` using an installed Kokoro, read-only. The Narrator stays on its own.
+5. **`maprisma-actions`.** Built on branch `step-5-actions`, 2026-11-13 (not merged or installed yet); see [overlay.md](overlay.md#actions).
+   - The helper proposes actions in one `maprisma-actions` JSON block of a fixed schema (11 kinds); the overlay parses it strictly and runs them itself, never through a shell.
+   - Levels: 0 runs with an Undo chip (apps, URLs, do not disturb, light/dark, volume, media, workspaces, weather), 1 waits for Enter on an amber card (close window, `run_command`), 2 is blocked (sudo, packages, deleting, autostart, secrets — also inside `run_command`'s argv). Outside text (a weather result, pasted text) makes later actions need Enter.
+   - Weather card from Open-Meteo; the log in `~/.local/state/maprisma-dictation/actions.jsonl`; settings `actions`, `confirm_all`, `weather_location`.
+   - Checked live on Hyprland (4K): "open Firefox", "how is the weather in Berlin" / "wie ist das Wetter in Hamburg?", the `run_command` card (cancelled), and `uname -r` confirmed through the real helper in a test harness.
+   - Follow-ups: the action log in Maprisma Manager; KDE's workspace/window commands on a live Plasma session; COSMIC has no workspace/window interface for other apps; `write_file`/`move_file` left out.
+6. **Spoken answers.** The service part is done, 2026-11-13: `Speak`/`StopSpeaking`, the `Speaking` signal and `maprisma-voice speak`. Checked live: Kokoro speaks two German sentences in 1.5 s, and Whisper transcribes them back word for word. The overlay's part is on branch `step-5-actions`: the `speak_answers` setting (off by default), `StopSpeaking` on Esc, closing or a new question/voice session, and a gently pulsing ring while it speaks; checked end to end on a private bus with a fake `pw-play`. The Narrator stays on its own.
 7. **Omarchy:** the adapter `omarchy-dictation-maprisma` for Omarchy's dictation keys; an optional wake word (off by default).
