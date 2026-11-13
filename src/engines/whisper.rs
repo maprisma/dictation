@@ -25,15 +25,23 @@ struct Running {
     model: PathBuf,
 }
 
-/// The one whisper-server of this process.
+/// A resident whisper-server: the main one (GPU when the build has one), or the wake
+/// recogniser's small one ([WhisperServer::cpu]).
 #[derive(Default)]
 pub struct WhisperServer {
     state: Mutex<Option<Running>>,
     /// When it was last asked for (ensure); for unloading when idle.
     used: Mutex<Option<Instant>>,
+    /// Some(n): CPU only (`-ng`) with n threads, so it never competes for the GPU's memory.
+    cpu_threads: Option<usize>,
 }
 
 impl WhisperServer {
+    /// A CPU-only server with `threads` threads (the wake recogniser's).
+    pub fn cpu(threads: usize) -> Self {
+        WhisperServer { cpu_threads: Some(threads.max(1)), ..Default::default() }
+    }
+
     /// The port of a running server for this binary and model; starts (or restarts) it when
     /// needed. Callers wait while it loads.
     pub fn ensure(&self, binary: &Path, model: &Path) -> Result<u16, VoiceError> {
@@ -47,7 +55,7 @@ impl WhisperServer {
         if let Some(mut old) = state.take() {
             old.child.kill();
         }
-        let running = start(binary, model)?;
+        let running = start(binary, model, self.cpu_threads)?;
         let port = running.port;
         *state = Some(running);
         Ok(port)
@@ -96,14 +104,18 @@ fn threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(4).clamp(1, 8)
 }
 
-fn start(binary: &Path, model: &Path) -> Result<Running, VoiceError> {
+fn start(binary: &Path, model: &Path, cpu_threads: Option<usize>) -> Result<Running, VoiceError> {
     use std::process::{Command, Stdio};
     let port = free_port().map_err(|e| VoiceError::engine(format!("no free port: {e}")))?;
     let mut command = Command::new(binary);
     command
         .arg("-m")
         .arg(model)
-        .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-t", &threads().to_string(), "-nt"])
+        .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-t", &cpu_threads.unwrap_or_else(threads).to_string(), "-nt"]);
+    if cpu_threads.is_some() {
+        command.arg("-ng");
+    }
+    command
         // No static files; it runs in / so it can't serve anything from the cwd.
         .args(["--public", "/nonexistent-maprisma-voice-public"])
         .current_dir("/")
@@ -340,5 +352,13 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         std::fs::write(&broken, "x").unwrap();
         let err = server.ensure(&binary, &broken).unwrap_err();
         assert!(err.message.contains("failed to load model"), "{}", err.message);
+        // The wake recogniser's server: CPU only, 4 threads; the main one has no -ng.
+        let cpu = WhisperServer::cpu(4);
+        cpu.ensure(&binary, &model).unwrap();
+        cpu.stop();
+        let log = std::fs::read_to_string(bin.join("server.log")).unwrap();
+        let starts: Vec<&str> = log.lines().filter(|l| l.starts_with("START")).collect();
+        assert!(starts.last().unwrap().ends_with("-t 4 -nt -ng --public /nonexistent-maprisma-voice-public"), "{}", starts.last().unwrap());
+        assert!(!starts[0].contains("-ng"));
     }
 }

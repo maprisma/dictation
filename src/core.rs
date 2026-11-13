@@ -122,6 +122,93 @@ pub trait Backend: Send + Sync + 'static {
     fn status(&self) -> serde_json::Map<String, serde_json::Value>;
 }
 
+/// Who else may use the microphone: the wake listener (src/wake.rs). Sessions always win: a
+/// starting session counts at once, and waits until the wake listener let go of the microphone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MicState {
+    /// Sessions that are starting or running (also a `WakeTest`).
+    pub sessions: usize,
+    /// The wake listener has the microphone open.
+    pub wake_holds: bool,
+    /// When the last session ended (the wake listener waits a moment after it).
+    pub last_end: Option<Instant>,
+}
+
+pub struct MicShare(tokio::sync::watch::Sender<MicState>);
+
+impl Default for MicShare {
+    fn default() -> Self {
+        MicShare(tokio::sync::watch::channel(MicState::default()).0)
+    }
+}
+
+/// A session's (or a wake test's) claim on the microphone; dropping it ends the claim.
+pub struct MicClaim {
+    share: Arc<MicShare>,
+    armed: bool,
+}
+
+impl MicClaim {
+    /// The claim now belongs to a running session (its close ends it).
+    fn hand_over(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MicClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            self.share.end_session();
+        }
+    }
+}
+
+impl MicShare {
+    pub fn state(&self) -> MicState {
+        *self.0.borrow()
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<MicState> {
+        self.0.subscribe()
+    }
+
+    /// The wake listener may open the microphone now (no session starts or runs); true: it holds it.
+    pub fn try_hold_wake(&self) -> bool {
+        self.0.send_if_modified(|s| {
+            if s.sessions == 0 && !s.wake_holds {
+                s.wake_holds = true;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// The wake listener closed the microphone.
+    pub fn release_wake(&self) {
+        self.0.send_if_modified(|s| std::mem::replace(&mut s.wake_holds, false));
+    }
+
+    fn end_session(&self) {
+        self.0.send_modify(|s| {
+            s.sessions = s.sessions.saturating_sub(1);
+            s.last_end = Some(Instant::now());
+        });
+    }
+
+    /// Claims the microphone for a session: the wake listener is told to stop at once, and this
+    /// waits (at most `limit`) until it has closed the microphone.
+    pub async fn claim(self: &Arc<Self>, limit: Duration) -> Result<MicClaim, VoiceError> {
+        self.0.send_modify(|s| s.sessions += 1);
+        let claim = MicClaim { share: self.clone(), armed: true };
+        let mut rx = self.subscribe();
+        match tokio::time::timeout(limit, rx.wait_for(|s| !s.wake_holds)).await {
+            Ok(Ok(_)) => Ok(claim),
+            _ => Err(VoiceError::engine("the wake listener did not release the microphone in time")),
+        }
+    }
+}
+
 enum Control {
     Finish,
     Cancel(&'static str),
@@ -155,6 +242,8 @@ pub struct Core {
     vad: VadConfig,
     limits: Limits,
     prefix: String,
+    /// The microphone, shared with the wake listener.
+    pub mic: Arc<MicShare>,
 }
 
 impl Core {
@@ -165,7 +254,7 @@ impl Core {
     pub fn with_limits(backend: Arc<dyn Backend>, vad: VadConfig, limits: Limits) -> (Arc<Core>, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let core = Core { backend, events: tx, inner: Arc::default(), starting: tokio::sync::Mutex::new(()), vad, limits, prefix: format!("{started:x}") };
+        let core = Core { backend, events: tx, inner: Arc::default(), starting: tokio::sync::Mutex::new(()), vad, limits, prefix: format!("{started:x}"), mic: Arc::default() };
         (Arc::new(core), rx)
     }
 
@@ -176,6 +265,8 @@ impl Core {
     /// Starts a session and returns its id; a listening session is preempted first (it gets its
     /// `Final` and `Closed("preempted")`).
     pub async fn start_session(self: &Arc<Self>, request: SessionRequest) -> Result<String, VoiceError> {
+        // The wake listener stops first (it must let go of the microphone before we open it).
+        let claim = self.mic.claim(self.limits.release).await?;
         let _one_at_a_time = self.starting.lock().await;
         let backend = self.backend.clone();
         let req = request.clone();
@@ -219,6 +310,7 @@ impl Core {
             inner.current = Some(id.clone());
             id
         };
+        claim.hand_over();
         self.emit(Event::State { id: id.clone(), state: "listening" });
         let core = self.clone();
         let session_id = id.clone();
@@ -305,12 +397,16 @@ impl Core {
     }
 
     fn close(&self, id: &str, reason: &str) {
-        {
+        let removed = {
             let mut inner = self.lock();
-            inner.sessions.remove(id);
+            let removed = inner.sessions.remove(id).is_some();
             if inner.current.as_deref() == Some(id) {
                 inner.current = None;
             }
+            removed
+        };
+        if removed {
+            self.mic.end_session();
         }
         self.emit(Event::Closed { id: id.into(), reason: reason.into() });
     }
@@ -853,6 +949,39 @@ pub mod tests {
         until_closed(&mut rx, &id, &mut seen).await;
         assert_eq!(seen.last(), Some(&Event::Closed { id, reason: "max_length".into() }));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// Sessions and the wake listener share the microphone: a session waits until the wake
+    /// listener let go, counts while it runs, and its end is noted.
+    #[tokio::test]
+    async fn mic_share_with_the_wake_listener() {
+        let (core, mut rx, _) = setup(FakeEngine::new("x"), vec![(vec![], true)]);
+        assert!(core.mic.try_hold_wake());
+        assert!(!core.mic.try_hold_wake(), "held once");
+        // A session starting now waits for the release.
+        let starter = core.clone();
+        let start = tokio::spawn(async move { starter.start_session(request("app", End::Release)).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!start.is_finished(), "waits while the wake listener holds the mic");
+        assert_eq!(core.mic.state().sessions, 1);
+        core.mic.release_wake();
+        let id = tokio::time::timeout(Duration::from_secs(2), start).await.unwrap().unwrap().unwrap();
+        // While it runs the wake listener can't take the microphone.
+        assert!(!core.mic.try_hold_wake());
+        core.cancel(&id).unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        let state = core.mic.state();
+        assert_eq!((state.sessions, state.wake_holds), (0, false));
+        assert!(state.last_end.is_some());
+        assert!(core.mic.try_hold_wake());
+        core.mic.release_wake();
+        // A start that fails (the listener never lets go) leaves no claim behind.
+        let (core, _rx) = Core::with_limits(fake_backend(Arc::new(FakeEngine::new("x"))), VadConfig::default(), quick());
+        assert!(core.mic.try_hold_wake());
+        let err = core.start_session(request("app", End::Release)).await.unwrap_err();
+        assert!(err.message.contains("wake listener"), "{}", err.message);
+        assert_eq!(core.mic.state().sessions, 0);
     }
 
     /// A new session never starts while the preempted one's recording is still being stopped:

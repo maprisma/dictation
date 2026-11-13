@@ -29,6 +29,29 @@ pub struct Settings {
     pub kokoro_runtime: String,
     /// The language of the service's own messages: `system` or one of the 8 codes.
     pub ui_language: String,
+    /// Listen for the wake phrase while no session runs (the microphone stays open).
+    pub wake_enabled: bool,
+    /// The spoken phrase that opens Maprisma Dictation ([valid_wake_phrase]).
+    pub wake_phrase: String,
+    /// The language the wake recogniser listens for: `auto` or a code.
+    pub wake_language: String,
+    /// The wake recogniser's model (id or file); empty: the smallest installed one.
+    pub wake_model: String,
+    /// One of [SENSITIVITIES]: how far what was heard may be from the phrase.
+    pub wake_sensitivity: String,
+}
+
+pub const SENSITIVITIES: [&str; 3] = ["strict", "normal", "loose"];
+pub const DEFAULT_WAKE_PHRASE: &str = "Hey Linux";
+
+/// 2–40 characters: letters, digits, spaces and basic punctuation (`,.!?'-`), with at least two
+/// letters or digits, no spaces at the ends.
+pub fn valid_wake_phrase(phrase: &str) -> bool {
+    let n = phrase.chars().count();
+    (2..=40).contains(&n)
+        && phrase.trim() == phrase
+        && phrase.chars().all(|c| c.is_alphanumeric() || c == ' ' || ",.!?'-".contains(c))
+        && phrase.chars().filter(|c| c.is_alphanumeric()).count() >= 2
 }
 
 impl Default for Settings {
@@ -44,6 +67,11 @@ impl Default for Settings {
             unload_minutes: 10,
             kokoro_runtime: String::new(),
             ui_language: "system".into(),
+            wake_enabled: false,
+            wake_phrase: DEFAULT_WAKE_PHRASE.into(),
+            wake_language: "auto".into(),
+            wake_model: String::new(),
+            wake_sensitivity: "normal".into(),
         }
     }
 }
@@ -78,6 +106,11 @@ pub fn parse(value: &Value) -> Settings {
         unload_minutes: value.get("unload_minutes").and_then(Value::as_u64).filter(|m| *m <= 1440).map_or(d.unload_minutes, |m| m as u32),
         kokoro_runtime: text("kokoro_runtime").filter(|s| s.starts_with('/') && !s.chars().any(char::is_control)).unwrap_or("").into(),
         ui_language: ui.into(),
+        wake_enabled: value.get("wake_enabled").and_then(Value::as_bool).unwrap_or(d.wake_enabled),
+        wake_phrase: text("wake_phrase").filter(|p| valid_wake_phrase(p)).unwrap_or(&d.wake_phrase).into(),
+        wake_language: text("wake_language").filter(|l| valid_language(l)).unwrap_or(&d.wake_language).into(),
+        wake_model: text("wake_model").filter(|m| crate::models::valid_setting(m)).unwrap_or("").into(),
+        wake_sensitivity: text("wake_sensitivity").filter(|s| SENSITIVITIES.contains(s)).unwrap_or(&d.wake_sensitivity).into(),
     }
 }
 
@@ -96,7 +129,11 @@ pub fn load(dirs: &Dirs) -> Settings {
 /// Checks a value for one of our keys before it is written (the CLI's `set`).
 pub fn check(key: &str, value: &Value) -> Result<(), String> {
     let ok = match key {
-        "enabled" | "preload" => value.is_boolean(),
+        "enabled" | "preload" | "wake_enabled" => value.is_boolean(),
+        "wake_phrase" => value.as_str().is_some_and(valid_wake_phrase),
+        "wake_language" => value.as_str().is_some_and(valid_language),
+        "wake_model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
+        "wake_sensitivity" => value.as_str().is_some_and(|s| SENSITIVITIES.contains(&s)),
         "unload_minutes" => value.as_u64().is_some_and(|m| m <= 1440),
         "engine" => value.as_str().is_some_and(|e| ENGINES.contains(&e)),
         "model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
@@ -208,5 +245,36 @@ mod tests {
         assert!(check("model", &json!("")).is_ok());
         assert!(check("model", &json!("a/b.bin")).is_err());
         assert!(check("nope", &json!(1)).is_err());
+    }
+
+    #[test]
+    fn wake_settings() {
+        let d = parse(&json!({}));
+        assert!(!d.wake_enabled);
+        assert_eq!((d.wake_phrase.as_str(), d.wake_language.as_str(), d.wake_model.as_str(), d.wake_sensitivity.as_str()), ("Hey Linux", "auto", "", "normal"));
+        let s = parse(&json!({"wake_enabled": true, "wake_phrase": "Hallo Rechner", "wake_language": "de", "wake_model": "base", "wake_sensitivity": "loose"}));
+        assert!(s.wake_enabled);
+        assert_eq!((s.wake_phrase.as_str(), s.wake_language.as_str(), s.wake_model.as_str(), s.wake_sensitivity.as_str()), ("Hallo Rechner", "de", "base", "loose"));
+        let broken = parse(&json!({"wake_enabled": "yes", "wake_phrase": "x", "wake_language": "Deutsch", "wake_model": "../m.bin", "wake_sensitivity": "very"}));
+        assert_eq!(broken, Settings::default());
+        for ok in ["Hey Linux", "Hey, Linux!", "Ok Computer", "Hallo Rechner", "Ça va", "R2-D2", "hi", "Hey Mac's"] {
+            assert!(valid_wake_phrase(ok), "{ok}");
+            assert!(check("wake_phrase", &json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in ["", "x", " Hey Linux", "Hey Linux ", "Hey; rm -rf", "Hey\nLinux", "!!", "a!", "Hey <Linux>", "a very long wake phrase that nobody can say"] {
+            assert!(!valid_wake_phrase(bad), "{bad}");
+            assert!(check("wake_phrase", &json!(bad)).is_err(), "{bad}");
+        }
+        assert!(check("wake_phrase", &json!(3)).is_err());
+        assert!(check("wake_enabled", &json!(true)).is_ok());
+        assert!(check("wake_enabled", &json!("on")).is_err());
+        assert!(check("wake_language", &json!("auto")).is_ok() && check("wake_language", &json!("de")).is_ok());
+        assert!(check("wake_language", &json!("German")).is_err());
+        assert!(check("wake_model", &json!("")).is_ok() && check("wake_model", &json!("ggml-tiny.bin")).is_ok());
+        assert!(check("wake_model", &json!("llama.gguf")).is_err());
+        for s in SENSITIVITIES {
+            assert!(check("wake_sensitivity", &json!(s)).is_ok());
+        }
+        assert!(check("wake_sensitivity", &json!("medium")).is_err());
     }
 }
