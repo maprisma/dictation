@@ -264,6 +264,81 @@ pub fn resolve(apps: &[App], query: &str) -> Found {
     if near.len() == 1 { Found::One(near[0].clone()) } else { Found::Choices(near) }
 }
 
+/// "Open Kindle", "öffne Kindle", "Kindle starten": the app name of a plain open request in the
+/// 8 languages, or None. Requests for a website or with more in them go to the helper.
+pub fn open_request(text: &str) -> Option<String> {
+    let t = text.trim().trim_end_matches(['.', '!', '?', ',', ' ']).trim();
+    let lower = t.to_lowercase();
+    const VERBS: &[&str] = &[
+        "please open ", "open up ", "open ", "launch ", "start ", "bitte öffne ", "öffne mir ", "öffne bitte ", "öffne ", "offne ", "starte mir ", "starte bitte ", "starte ",
+        "ouvre ", "ouvrir ", "lance ", "abre ", "abra ", "abrir ", "inicia ", "apri ", "avvia ", "otwórz ", "uruchom ",
+    ];
+    const AFTER: &[&str] = &[" öffnen", " starten", " auf", " bitte", " please", " for me"];
+    let (lower_rest, cut_front) = match VERBS.iter().find(|v| lower.starts_with(*v)) {
+        Some(v) => (lower[v.len()..].to_string(), true),
+        None => (lower.clone(), false),
+    };
+    let mut name = lower_rest.trim().to_string();
+    let mut found_after = false;
+    loop {
+        match AFTER.iter().find(|a| name.ends_with(*a)) {
+            Some(a) => {
+                name.truncate(name.len() - a.len());
+                name = name.trim().to_string();
+                found_after = true;
+            }
+            None => break,
+        }
+    }
+    // "mach Kindle auf" / "Kindle öffnen" without a verb in front.
+    if !cut_front {
+        let Some(rest) = name.strip_prefix("mach ").or_else(|| name.strip_prefix("mache ")) else {
+            if !found_after {
+                return None;
+            }
+            return finish(t, &name);
+        };
+        name = rest.trim().to_string();
+        if !found_after {
+            return None;
+        }
+    }
+    finish(t, &name)
+}
+
+fn finish(original: &str, lower_name: &str) -> Option<String> {
+    let mut name = lower_name.trim();
+    for a in ["the ", "my ", "die ", "der ", "das ", "den ", "meine ", "mein ", "le ", "la ", "l'", "el ", "il ", "o ", "a ", "de "] {
+        if let Some(rest) = name.strip_prefix(a) {
+            name = rest.trim();
+        }
+    }
+    for a in [" app", " application", " anwendung", " programm"] {
+        if let Some(rest) = name.strip_suffix(a) {
+            name = rest.trim();
+        }
+    }
+    let w = words(name);
+    // A website, a file or a whole sentence: the helper knows better.
+    const SITE: &[&str] = &["website", "webseite", "seite", "page", "site", "homepage", "url", "link", "datei", "file", "ordner", "folder", "und", "and", "et", "y", "e", "i", "en"];
+    if w.is_empty() || w.len() > 4 || name.contains(['/', ':']) || name.contains(".com") || name.contains(".de") || w.iter().any(|x| SITE.contains(&x.as_str())) {
+        return None;
+    }
+    // Keep the user's spelling (the name as said, not lower-cased).
+    let lower = original.to_lowercase();
+    match lower.find(name) {
+        Some(i) if original.is_char_boundary(i) && original.is_char_boundary(i + name.len()) && lower.len() == original.len() => Some(original[i..i + name.len()].to_string()),
+        _ => Some(name.to_string()),
+    }
+}
+
+/// An open request that names exactly one installed app (desktop apps and web apps alike):
+/// the overlay opens it at once instead of asking the helper, who might pick a website.
+pub fn direct_open(apps: &[App], text: &str) -> Option<String> {
+    let name = open_request(text)?;
+    matches!(resolve(apps, &name), Found::One(_)).then_some(name)
+}
+
 /// The command that starts it: `gtk-launch <id>` for the standard folders, else `gio launch <path>`.
 pub fn launch_argv(app: &App) -> Vec<String> {
     if app.standard {
@@ -372,5 +447,39 @@ mod tests {
         assert_eq!(launch_argv(signal)[..2], ["gio".to_string(), "launch".to_string()]);
         let firefox = apps.iter().find(|a| a.name == "Firefox").unwrap();
         assert_eq!(launch_argv(firefox), ["gtk-launch", "firefox"]);
+    }
+
+    #[test]
+    fn open_requests() {
+        let o = |t: &str| open_request(t);
+        assert_eq!(o("Open Kindle"), Some("Kindle".into()));
+        assert_eq!(o("open Kindle."), Some("Kindle".into()));
+        assert_eq!(o("Open Kindle Up"), Some("Kindle Up".into()));
+        assert_eq!(o("Öffne Kindle!"), Some("Kindle".into()));
+        assert_eq!(o("öffne bitte die Kindle App"), Some("Kindle".into()));
+        assert_eq!(o("Kindle öffnen"), Some("Kindle".into()));
+        assert_eq!(o("mach Kindle auf"), Some("Kindle".into()));
+        assert_eq!(o("starte Firefox bitte"), Some("Firefox".into()));
+        assert_eq!(o("ouvre Kindle"), Some("Kindle".into()));
+        assert_eq!(o("otwórz Kindle"), Some("Kindle".into()));
+        assert_eq!(o("öffne die YouTube Webseite"), None);
+        assert_eq!(o("open youtube.com"), None);
+        assert_eq!(o("open Kindle and read the last book"), None);
+        assert_eq!(o("Kindle"), None);
+        assert_eq!(o("Wie ist das Wetter?"), None);
+    }
+
+    #[test]
+    fn web_apps_first() {
+        let (_root, mut dirs) = fake("webapp");
+        write(&dirs[0].0, "chrome-klmgdcdnnefbfkpmkcmocagbihobefnh-Default.desktop", &entry("Kindle", "StartupWMClass=crx_klmgdcdnnefbfkpmkcmocagbihobefnh"));
+        write(&dirs[1].0, "reader.desktop", &entry("Narrator", "Comment=Read Kindle pages aloud"));
+        dirs.truncate(3);
+        let apps = scan(&dirs, "", "Hyprland");
+        assert_eq!(direct_open(&apps, "Open Kindle"), Some("Kindle".into()));
+        assert_eq!(direct_open(&apps, "Open Kindle Up"), Some("Kindle Up".into()));
+        assert!(matches!(resolve(&apps, "Kindle Up"), Found::One(a) if a.name == "Kindle"));
+        assert_eq!(direct_open(&apps, "open photoshop"), None);
+        assert_eq!(direct_open(&apps, "open a browser"), None); // several: the helper/choices
     }
 }

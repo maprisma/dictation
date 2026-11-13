@@ -263,7 +263,7 @@ To propose them, end your answer with ONE fenced code block whose info string is
 {\"kind\": \"weather\", \"location\": \"Berlin\"}   (\"\" for the user's own place; the overlay fetches the forecast and shows it as a card)\n\
 {\"kind\": \"run_command\", \"argv\": [\"program\", \"arg\"], \"why\": \"<short reason>\"}   (no shell; runs in the home folder only after the user presses Enter; \
 only for what the kinds above can't do; sudo, packages, deleting files, autostart and secrets are always refused)\n\
-Use no other kinds or fields. Propose actions only when the user asks for something to be done or for the weather. \
+To open something by name (\"open Kindle\", \"öffne Netflix\"), use open_app even when it is also a website: installed apps include web apps, and the overlay looks there first. Use open_url only for an address, or when the user asks for the website. Use no other kinds or fields. Propose actions only when the user asks for something to be done or for the weather. \
 Never claim a result you cannot know. For the weather write no text, or only a few words: the card shows the place and the numbers; \
 never make them up. If no action fits, say how the user can do it.";
 

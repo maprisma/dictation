@@ -536,6 +536,15 @@ impl Overlay {
                 tokio::time::sleep(Duration::from_millis(1600)).await;
                 return (Ok(voice::DEMO_ANSWER.to_string()), "Demo".to_string());
             }
+            // "Open Kindle": an installed app (web apps too) opens at once, without the helper.
+            if actions {
+                let (q, lang) = (question.clone(), language.clone());
+                let direct = tokio::task::spawn_blocking(move || actions::apps::direct_open(&actions::apps::installed(&lang), &q)).await.ok().flatten();
+                if let Some(name) = direct {
+                    let block = serde_json::json!([{"kind": "open_app", "name": name}]);
+                    return (Ok(format!("```maprisma-actions\n{block}\n```")), String::new());
+                }
+            }
             let found = tokio::task::spawn_blocking(|| {
                 let installed = helper::installed();
                 helper::choose(&crate::shared_ai::choice(), &installed)
