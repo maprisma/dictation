@@ -217,7 +217,7 @@ impl cosmic::Application for Applet {
         if self.shown.active() {
             // Green while the microphone listens, as every Maprisma bar icon that is on.
             bar_icon = bar_icon.class(theme::Svg::custom(|theme: &cosmic::Theme| iced_svg::Style {
-                color: Some(theme.cosmic().success_color().into()),
+                color: Some(theme.cosmic().accent_color().into()),
             }));
         }
         let button = button::custom(bar_icon)

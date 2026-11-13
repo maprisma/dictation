@@ -30,7 +30,7 @@ pub const SNI_ID: &str = "maprisma-dictation";
 
 pub const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-symbolic";
 pub const ICON_OPEN: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-open-symbolic";
-/// The microphone while it listens, in the theme's green (class ColorScheme-PositiveText):
+/// The microphone while it listens, in the theme accent (class ColorScheme-Highlight):
 /// every Maprisma bar icon that is on uses this one colour; Maprisma Shell tints any
 /// -active-symbolic tray icon green, the COSMIC applet draws it in the success colour.
 pub const ICON_LISTENING: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-listening-active-symbolic";
@@ -506,14 +506,14 @@ mod tests {
         }
         assert!(applet.lines().filter(|l| l.starts_with("Comment[")).count() == 7);
         // Every icon the bar shows ships, symbolic (currentColor + KDE's ColorScheme-Text);
-        // the listening one is "on": green (ColorScheme-PositiveText), named -active-symbolic.
+        // the listening one is "on": green (ColorScheme-Highlight), named -active-symbolic.
         for icon in [ICON, ICON_OPEN, ICON_SPEAKING, ICON_WAKE] {
             let svg = std::fs::read_to_string(format!("../data/icons/{icon}.svg")).unwrap_or_else(|_| panic!("{icon}"));
             assert!(svg.contains("currentColor") && svg.contains("ColorScheme-Text"), "{icon}");
         }
         assert!(ICON_LISTENING.ends_with("-active-symbolic"));
         let svg = std::fs::read_to_string(format!("../data/icons/{ICON_LISTENING}.svg")).unwrap();
-        assert!(svg.contains("currentColor") && svg.contains(r#"class="ColorScheme-PositiveText""#));
+        assert!(svg.contains("currentColor") && svg.contains(r#"class="ColorScheme-Highlight""#));
         assert!(!svg.contains("ColorScheme-Text"));
         let install = std::fs::read_to_string("../install.sh").unwrap();
         assert!(install.contains(r#""$bar_id-listening-active-symbolic""#));
