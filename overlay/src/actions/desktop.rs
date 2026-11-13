@@ -4,7 +4,11 @@
 //! | | workspace N | move window to N | close window |
 //! |---|---|---|---|
 //! | Hyprland | `hyprctl dispatch hl.dsp.focus({workspace = "N"})`, else `workspace N` | `hl.dsp.window.move({workspace = "N", window = "address:…"})`, else `movetoworkspace N,address:…` | `hl.dsp.window.close({window = "address:…"})`, else `closewindow address:…` |
-//! | KDE Plasma | `org.kde.KWin /KWin setCurrentDesktop(N)` | a KWin script | a KWin script |
+//! | KDE Plasma | `org.kde.KWin /KWin setCurrentDesktop(N)` (must answer `true`) | a KWin script | a KWin script |
+//!
+//! KWin runs a script without telling whether it did anything, so each script reports
+//! `ok`, `no-window`, `no-desktop` or `error: …` back to the overlay's `KwinResult`
+//! ([kwin_script]); no report means it failed.
 //! | COSMIC | no interface for other apps: unsupported | unsupported | unsupported |
 
 use crate::look::Desktop;
@@ -16,7 +20,8 @@ pub enum Step {
     Hyprctl(Vec<String>),
     /// `org.kde.KWin /KWin org.kde.KWin.setCurrentDesktop(i)`.
     KwinDesktop(i32),
-    /// A KWin script (JavaScript) loaded and run through org.kde.kwin.Scripting.
+    /// A KWin script (JavaScript) loaded and run through org.kde.kwin.Scripting; its body calls
+    /// `report(…)` ([kwin_script] adds that function).
     KwinScript(String),
 }
 
@@ -59,7 +64,7 @@ pub fn move_window(desktop: Desktop, n: u32, window: Option<&str>) -> Plan {
             None => Plan::Unsupported,
         },
         Desktop::Kde => Plan::Try(vec![Step::KwinScript(format!(
-            "(function () {{ {KWIN_TARGET} const d = workspace.desktops[{}]; if (w && d) {{ w.desktops = [d]; workspace.currentDesktop = d; workspace.activeWindow = w; }} }})();",
+            "(function () {{ {KWIN_TARGET} const d = workspace.desktops[{}]; if (!w) report(\"no-window\"); else if (!d) report(\"no-desktop\"); else {{ w.desktops = [d]; workspace.currentDesktop = d; workspace.activeWindow = w; report(\"ok\"); }} }})();",
             n - 1
         ))]),
         Desktop::Cosmic | Desktop::Other => Plan::Unsupported,
@@ -72,9 +77,21 @@ pub fn close_window(desktop: Desktop, window: Option<&str>) -> Plan {
             Some(w) => Plan::Try(vec![hyprctl(&["dispatch", &format!("hl.dsp.window.close({{window = \"address:{w}\"}})")]), hyprctl(&["dispatch", "closewindow", &format!("address:{w}")])]),
             None => Plan::Unsupported,
         },
-        Desktop::Kde => Plan::Try(vec![Step::KwinScript(format!("(function () {{ {KWIN_TARGET} if (w) w.closeWindow(); }})();"))]),
+        Desktop::Kde => Plan::Try(vec![Step::KwinScript(format!("(function () {{ {KWIN_TARGET} if (!w) report(\"no-window\"); else {{ w.closeWindow(); report(\"ok\"); }} }})();"))]),
         Desktop::Cosmic | Desktop::Other => Plan::Unsupported,
     }
+}
+
+/// The script KWin loads: `report(r)` calls the overlay's `KwinResult(token, r)`, and an
+/// exception is reported as `error: …`. `token` is only letters, digits, `_` and `-`.
+pub fn kwin_script(body: &str, token: &str) -> String {
+    let token: String = token.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').take(64).collect();
+    format!(
+        "function report(r) {{ callDBus(\"{}\", \"{}\", \"{}\", \"KwinResult\", \"{token}\", String(r)); }}\ntry {{ {body} }} catch (e) {{ report(\"error: \" + e); }}\n",
+        crate::instance::NAME,
+        crate::instance::PATH,
+        crate::instance::INTERFACE,
+    )
 }
 
 /// `hyprctl -j activeworkspace` → its id.
@@ -134,8 +151,13 @@ mod tests {
         let Plan::Try(steps) = move_window(Desktop::Kde, 2, None) else { panic!() };
         let Step::KwinScript(js) = &steps[0] else { panic!() };
         assert!(js.contains("workspace.desktops[1]") && js.contains("w.desktops = [d]"));
+        // every way out reports: a missing window or desktop is no success
+        assert!(js.contains("report(\"no-window\")") && js.contains("report(\"no-desktop\")") && js.contains("report(\"ok\")"));
+        let full = kwin_script(js, "maprisma_1_2\"); evil");
+        assert!(full.contains("callDBus(\"com.maprisma.Dictation\", \"/com/maprisma/Dictation\", \"com.maprisma.Dictation\", \"KwinResult\", \"maprisma_1_2evil\""));
+        assert!(full.contains("catch (e) { report(\"error: \" + e); }"));
         let Plan::Try(steps) = close_window(Desktop::Kde, None) else { panic!() };
-        assert!(matches!(&steps[0], Step::KwinScript(js) if js.contains("closeWindow()") && js.contains("normalWindow")));
+        assert!(matches!(&steps[0], Step::KwinScript(js) if js.contains("closeWindow()") && js.contains("normalWindow") && js.contains("report(\"no-window\")")));
         for plan in [workspace(Desktop::Cosmic, 1), move_window(Desktop::Cosmic, 1, None), close_window(Desktop::Cosmic, None), workspace(Desktop::Other, 1)] {
             assert_eq!(plan, Plan::Unsupported);
         }

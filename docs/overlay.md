@@ -168,8 +168,8 @@ text and is never read aloud.
 |---|---|---|---|---|
 | `open_app` | `name` (≤ 100) | 0 | finds the app among the desktop entries (`$XDG_DATA_HOME/applications`, `$XDG_DATA_DIRS/*/applications`, Flatpak exports; NoDisplay/Hidden/OnlyShowIn respected) by Name (also localized), id, GenericName or Keywords, exact, prefix, word or one typo; starts it with `gtk-launch <id>` (or `gio launch <file>`) in a session of its own. A kind of app several are ("a browser") shows them as buttons to pick. | – |
 | `open_url` | `url` (http/https with a host) | 0 | `xdg-open` | – |
-| `dnd` | `on` | 0 | Maprisma Notifier's switch: `dnd` in `~/.config/maprisma-notifier/settings.json` (other keys kept); its recorder applies it on each desktop | previous value |
-| `theme_mode` | `mode`: `light`/`dark` | 0 | Maprisma Theme: nothing when the current theme already is that mode, else the most recently used theme of that mode (themes hidden in Maprisma Theme only when there is no other), applied with `maprisma-theme-core apply <slug>`. Light = a `light.mode` file or a background luminance > 0.5, as Maprisma Theme decides. | the previous theme |
+| `dnd` | `on` | 0 | Maprisma Notifier's switch: `dnd` in `~/.config/maprisma-notifier/settings.json` (other keys kept); its recorder applies it on each desktop (written under the Notifier's `settings.json.lock`); unsupported when `maprisma-notifier-recorder` is not installed | previous value |
+| `theme_mode` | `mode`: `light`/`dark` | 0 | Maprisma Theme (needed on every desktop; without `maprisma-theme-core` the action is unsupported, the desktop's own light/dark switch is not used): nothing when the current theme already is that mode, else the most recently used theme of that mode (themes hidden in Maprisma Theme only when there is no other), applied with `maprisma-theme-core apply <slug>`. Light = a `light.mode` file or a background luminance > 0.5, as Maprisma Theme decides. | the previous theme |
 | `volume` | `percent` 0–100 or `change` ±1–100, and/or `mute` | 0 | `wpctl` on `@DEFAULT_AUDIO_SINK@` (never above 100 %; a change on a muted sink unmutes) | previous volume and mute |
 | `media` | `command`: `play_pause`/`next`/`previous` | 0 | `playerctl` | play/pause only |
 | `workspace` | `number` 1–20 | 0 | per desktop (table below) | the previous workspace |
@@ -216,10 +216,12 @@ Actions run one at a time, in order. The helper's follow-up sees what they did.
 
 | | Hyprland | KDE Plasma 6 | COSMIC |
 |---|---|---|---|
-| workspace | `hyprctl dispatch hl.dsp.focus({workspace = "N"})`, else `workspace N` | `org.kde.KWin /KWin setCurrentDesktop` (busctl) | unsupported (no interface for other apps) |
-| move window | `hl.dsp.window.move({workspace = "N", window = "address:…"})`, else `movetoworkspace` | a KWin script (loadScript/run/unloadScript through busctl; the newest normal window, never the overlay) | unsupported |
+| workspace | `hyprctl dispatch hl.dsp.focus({workspace = "N"})`, else `workspace N` | `org.kde.KWin /KWin setCurrentDesktop` (busctl; only a `true` answer counts) | unsupported (no interface for other apps) |
+| move window | `hl.dsp.window.move({workspace = "N", window = "address:…"})`, else `movetoworkspace` | a KWin script (loadScript/run/unloadScript through busctl; the newest normal window, never the overlay; it reports `ok`/`no-window`/`no-desktop`/`error` back with `callDBus` to the overlay's `KwinResult`, no report within 2 s = failed) | unsupported |
 | close window | `hl.dsp.window.close({window = "address:…"})`, else `closewindow` | a KWin script | unsupported |
-| apps, URLs, volume, media, DND, theme, weather | yes | yes | yes |
+| apps, URLs, volume, media, weather | yes | yes | yes |
+| DND | with Maprisma Notifier | with Maprisma Notifier | with Maprisma Notifier |
+| light/dark theme | with Maprisma Theme | with Maprisma Theme | with Maprisma Theme |
 
 KDE's commands are built and tested but not tried on a live Plasma session yet.
 

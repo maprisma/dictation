@@ -240,6 +240,26 @@ pub fn busctl_int(out: &str) -> Option<i32> {
     out.trim().strip_prefix("i ")?.trim().parse().ok()
 }
 
+/// `busctl` prints `b true`.
+pub fn busctl_bool(out: &str) -> Option<bool> {
+    match out.trim().strip_prefix("b ")?.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// What a KWin script reported (None: nothing in time) → done or why not.
+pub fn kwin_outcome(report: Option<&str>) -> Result<(), String> {
+    match report {
+        Some("ok") => Ok(()),
+        Some("no-window") => Err(tr("There is no window to do that with.")),
+        Some("no-desktop") => Err(tr("There is no such workspace.")),
+        Some(other) => Err(other.chars().take(200).collect()),
+        None => Err(tr("KWin did not confirm it.")),
+    }
+}
+
 fn run_step(step: &Step) -> Result<(), String> {
     match step {
         Step::Hyprctl(args) => {
@@ -250,21 +270,29 @@ fn run_step(step: &Step) -> Result<(), String> {
         }
         Step::KwinDesktop(n) => {
             let r = run_capture(&busctl_argv("/KWin", "org.kde.KWin", "setCurrentDesktop", "i", &[&n.to_string()]), Duration::from_secs(6), None).map_err(|e| e.to_string())?;
-            if r.ok { Ok(()) } else { Err(first_line(&r.stdout, &r.stderr)) }
+            // KWin answers false for a desktop it doesn't have.
+            match (r.ok, busctl_bool(&r.stdout)) {
+                (true, Some(true)) => Ok(()),
+                (true, Some(false)) => Err(tr("There is no such workspace.")),
+                _ => Err(first_line(&r.stdout, &r.stderr)),
+            }
         }
         Step::KwinScript(js) => {
             let dir = crate::paths::runtime_dir().map_err(|e| e.to_string())?;
             static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let plugin = format!("maprisma_dictation_{}_{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             let file = dir.join(format!("{plugin}.js"));
-            system::write_atomic(&file, js.as_bytes()).map_err(|e| e.to_string())?;
+            system::write_atomic(&file, desktop::kwin_script(js, &plugin).as_bytes()).map_err(|e| e.to_string())?;
             let path = file.to_string_lossy().into_owned();
             let result = (|| {
                 let r = run_capture(&busctl_argv("/Scripting", "org.kde.kwin.Scripting", "loadScript", "ss", &[&path, &plugin]), Duration::from_secs(6), None).map_err(|e| e.to_string())?;
                 let id = busctl_int(&r.stdout).filter(|i| *i >= 0).ok_or_else(|| first_line(&r.stdout, &r.stderr))?;
                 let r = run_capture(&busctl_argv(&format!("/Scripting/Script{id}"), "org.kde.kwin.Script", "run", "", &[]), Duration::from_secs(6), None).map_err(|e| e.to_string())?;
-                std::thread::sleep(Duration::from_millis(250));
-                if r.ok { Ok(()) } else { Err(first_line(&r.stdout, &r.stderr)) }
+                if !r.ok {
+                    return Err(first_line(&r.stdout, &r.stderr));
+                }
+                // The script reports through the overlay's KwinResult (desktop::kwin_script).
+                kwin_outcome(crate::instance::wait_kwin_result(&plugin, Duration::from_secs(2)).as_deref())
             })();
             let _ = run_capture(&busctl_argv("/Scripting", "org.kde.kwin.Scripting", "unloadScript", "s", &[&plugin]), Duration::from_secs(6), None);
             let _ = std::fs::remove_file(&file);
@@ -318,8 +346,12 @@ pub fn volume_text(state: (f64, bool)) -> String {
     if state.1 { trf("Volume {0} %, muted", &[&p]) } else { trf("Volume {0} %", &[&p]) }
 }
 
+/// Do not disturb is Maprisma Notifier's: its recorder applies the `dnd` key of its settings to
+/// the desktop (COSMIC's key, KDE's inhibition, Maprisma Shell). Without it nothing would change.
 fn set_dnd(on: bool) -> Result<bool, String> {
     let path = system::notifier_settings();
+    // The Notifier's lock protocol for its settings file (an OFD lock on settings.json.lock).
+    let _lock = system::JsonLock::take(&path).map_err(|e| e.to_string())?;
     let old = std::fs::read(&path).ok();
     let before = system::dnd_of(old.as_deref());
     system::write_atomic(&path, &system::with_key(old.as_deref(), "dnd", on.into())).map_err(|e| e.to_string())?;
@@ -354,6 +386,7 @@ pub fn execute(action: &Action, target: &Target, ctx: &Context) -> Outcome {
             Ok(()) => Outcome::Done { text: trf("Opened {0}", &[&host_of(url)]), undo: None },
             Err(e) => failed(e),
         },
+        Action::Dnd { .. } if !system::notifier_installed(&std::env::var("PATH").unwrap_or_default()) => Outcome::Unsupported(tr("Maprisma Notifier is not installed.")),
         Action::Dnd { on } => match set_dnd(*on) {
             Ok(before) => Outcome::Done { text: if *on { tr("Do not disturb is on") } else { tr("Do not disturb is off") }, undo: (before != *on).then_some(Undo::Dnd(before)) },
             Err(e) => failed(e),
@@ -547,6 +580,13 @@ mod tests {
         assert_eq!(busctl_argv("/KWin", "org.kde.KWin", "currentDesktop", "", &[]).len(), 8);
         assert_eq!(busctl_int("i 5\n"), Some(5));
         assert_eq!(busctl_int("s \"x\""), None);
+        assert_eq!(busctl_bool("b true\n"), Some(true));
+        assert_eq!(busctl_bool("b false"), Some(false));
+        assert_eq!(busctl_bool("i 1"), None);
+        assert_eq!(kwin_outcome(Some("ok")), Ok(()));
+        assert!(kwin_outcome(Some("no-window")).is_err() && kwin_outcome(Some("no-desktop")).is_err());
+        assert_eq!(kwin_outcome(Some("error: TypeError")), Err("error: TypeError".into()));
+        assert!(kwin_outcome(None).is_err());
         assert_eq!(host_of("https://user@example.org:8080/a?b"), "example.org:8080");
     }
 }

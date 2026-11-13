@@ -58,6 +58,43 @@ pub fn dnd_of(bytes: Option<&[u8]>) -> bool {
     bytes.and_then(|b| serde_json::from_slice::<Value>(b).ok()).and_then(|v| v.get("dnd").and_then(Value::as_bool)).unwrap_or(false)
 }
 
+/// Maprisma Notifier's recorder is what applies its `dnd` key to the desktop.
+pub fn notifier_installed(path_env: &str) -> bool {
+    crate::helper::which_in("maprisma-notifier-recorder", path_env).is_some()
+}
+
+/// The Notifier's lock for a settings file it shares with other writers: an open file description
+/// lock (`fcntl F_OFD_SETLKW`) on `<file>.lock`, held until dropped (maprisma-notifier
+/// `paths::JsonLock`, docs/plan.md "Writing the settings").
+pub struct JsonLock(#[allow(dead_code)] std::fs::File);
+
+impl JsonLock {
+    pub fn take(path: &Path) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let lock = path.with_file_name(format!("{name}.lock"));
+        if let Some(parent) = lock.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_CLOEXEC).open(&lock)?;
+        // SAFETY: a zeroed flock is a valid "whole file" range; fcntl only reads it.
+        let mut range: libc::flock = unsafe { std::mem::zeroed() };
+        range.l_type = libc::F_WRLCK as _;
+        range.l_whence = libc::SEEK_SET as _;
+        loop {
+            // SAFETY: fcntl on a descriptor this File owns, with a valid flock.
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLKW, &range) } == 0 {
+                return Ok(Self(file));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
 /// The settings with one key set, every other key kept (a broken file starts empty).
 pub fn with_key(bytes: Option<&[u8]>, key: &str, value: Value) -> Vec<u8> {
     let mut object = match bytes.and_then(|b| serde_json::from_slice::<Value>(b).ok()) {
@@ -216,6 +253,24 @@ pub fn theme_apply_error(stdout: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dnd_needs_the_notifier_and_takes_its_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("maprisma-dictation-dnd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!notifier_installed(dir.to_str().unwrap()));
+        let bin = dir.join("maprisma-notifier-recorder");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(notifier_installed(&format!("/nonexistent:{}", dir.display())));
+        let settings = dir.join("notifier/settings.json");
+        let lock = JsonLock::take(&settings).unwrap();
+        assert!(dir.join("notifier/settings.json.lock").is_file());
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn volume() {

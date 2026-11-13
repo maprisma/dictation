@@ -38,9 +38,43 @@ impl Overlay {
     fn close(&self) {
         let _ = self.sender.send(Command::Close);
     }
+    /// A KWin script run for an action says what it did (actions/desktop.rs `kwin_script`).
+    fn kwin_result(&self, token: String, result: String) {
+        record_kwin_result(&token, &result);
+    }
     /// The wake phrase was heard (`maprisma-dictation --wake [--ask-rest REST]` while open).
     fn wake(&self, rest: String) {
         let _ = self.sender.send(Command::Wake(rest.chars().take(MAX_REST).collect()));
+    }
+}
+
+/// What KWin scripts reported, by their token (newest last, a few kept).
+static KWIN_RESULTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static KWIN_ARRIVED: std::sync::Condvar = std::sync::Condvar::new();
+
+pub fn record_kwin_result(token: &str, result: &str) {
+    if token.is_empty() || token.len() > 64 {
+        return;
+    }
+    let mut results = KWIN_RESULTS.lock().unwrap_or_else(|e| e.into_inner());
+    results.retain(|(t, _)| t != token);
+    if results.len() >= 16 {
+        results.remove(0);
+    }
+    results.push((token.to_string(), result.chars().take(200).collect()));
+    KWIN_ARRIVED.notify_all();
+}
+
+/// Waits (blocking) up to `timeout` for the script with this token to report.
+pub fn wait_kwin_result(token: &str, timeout: std::time::Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut results = KWIN_RESULTS.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some(i) = results.iter().position(|(t, _)| t == token) {
+            return Some(results.remove(i).1);
+        }
+        let left = deadline.checked_duration_since(std::time::Instant::now())?;
+        results = KWIN_ARRIVED.wait_timeout(results, left).unwrap_or_else(|e| e.into_inner()).0;
     }
 }
 
@@ -100,6 +134,20 @@ pub static TEST_NAME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 mod tests {
     use super::*;
 
+    #[test]
+    fn kwin_results_by_token() {
+        let t = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            record_kwin_result("tok-a", "ok");
+        });
+        assert_eq!(wait_kwin_result("tok-a", std::time::Duration::from_secs(2)).as_deref(), Some("ok"));
+        t.join().unwrap();
+        // taken once; another token or none at all times out
+        assert_eq!(wait_kwin_result("tok-a", std::time::Duration::from_millis(30)), None);
+        record_kwin_result("", "ok");
+        assert_eq!(wait_kwin_result("", std::time::Duration::from_millis(10)), None);
+    }
+
     #[tokio::test]
     #[ignore = "needs a session bus: dbus-run-session -- cargo test -p maprisma-dictation -- --ignored"]
     async fn single_instance_and_toggle() {
@@ -115,6 +163,11 @@ mod tests {
         assert_eq!(commands.recv().await, Some(Command::Release));
         assert_eq!(commands.recv().await, Some(Command::Wake("open Firefox".into())));
         assert_eq!(commands.recv().await, Some(Command::Wake(String::new())));
+        // a KWin script's callDBus report reaches the waiting action
+        let c = zbus::Connection::session().await.unwrap();
+        c.call_method(Some(NAME), PATH, Some(INTERFACE), "KwinResult", &("maprisma_dictation_t_1", "no-window")).await.unwrap();
+        let got = tokio::task::spawn_blocking(|| wait_kwin_result("maprisma_dictation_t_1", std::time::Duration::from_secs(2))).await.unwrap();
+        assert_eq!(got.as_deref(), Some("no-window"));
         drop(first);
     }
 }
