@@ -2,6 +2,7 @@
 //! - `$XDG_CONFIG_HOME/maprisma-dictation/settings.json`: its settings (read only here; Maprisma
 //!   Manager's Voice page writes them, see docs/overlay.md);
 //! - `$XDG_CONFIG_HOME/maprisma-ai/settings.json`: the AI helper all Maprisma apps share;
+//! - `$XDG_STATE_HOME/maprisma-dictation/actions.jsonl`: the action log (0700/0600, rotated at 1 MB);
 //! - `$XDG_RUNTIME_DIR/maprisma-dictation/`: the last exchange (for follow-ups within 45 s) and
 //!   the helper's work folder, both private (0700/0600) and gone at logout.
 //!
@@ -19,7 +20,7 @@ pub fn test_roots() -> PathBuf {
         .get_or_init(|| {
             let dir = std::env::temp_dir().join(format!("maprisma-dictation-test-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            for sub in ["config", "runtime"] {
+            for sub in ["config", "runtime", "state"] {
                 std::fs::create_dir_all(dir.join(sub)).unwrap();
             }
             dir
@@ -43,6 +44,14 @@ pub fn config_root() -> PathBuf {
         return test_roots().join("config");
     }
     xdg("XDG_CONFIG_HOME", ".config")
+}
+
+/// `$XDG_STATE_HOME` (the action log).
+pub fn state_root() -> PathBuf {
+    if cfg!(test) {
+        return test_roots().join("state");
+    }
+    xdg("XDG_STATE_HOME", ".local/state")
 }
 
 /// `$XDG_RUNTIME_DIR` (else a folder in the cache) — private to this user.

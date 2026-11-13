@@ -2,6 +2,7 @@
 //! listens through maprisma-voice (com.maprisma.Voice1), asks the shared AI helper and shows the
 //! answer, with the aura ring around the pill.
 
+pub mod actions;
 pub mod aura;
 pub mod corners;
 pub mod helper;
