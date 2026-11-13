@@ -6,7 +6,8 @@
 
 use crate::paths::Dirs;
 use crate::procs::ChildGuard;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,10 @@ use std::time::{Duration, Instant};
 
 /// The longest text one `Speak` takes.
 pub const MAX_TEXT: usize = 8000;
+
+/// How long one sentence may take Kokoro (the first one loads the model). A worker that takes
+/// longer is killed; the speech ends with an error.
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpeechEvent {
@@ -101,15 +106,52 @@ pub fn sentences(text: &str) -> Vec<String> {
     out
 }
 
-struct Worker {
-    child: ChildGuard,
+/// The worker's pipes. While a sentence is being made they are out of `Inner` (the lock is
+/// never held during worker I/O), so Stop, Status and a new session never wait for Kokoro.
+struct WorkerIo {
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: ChildStdout,
+    pending: Vec<u8>,
+}
+
+impl WorkerIo {
+    /// One reply line, or an error when the worker ends or `deadline` passes.
+    fn read_line(&mut self, deadline: Instant) -> Result<String, &'static str> {
+        loop {
+            if let Some(n) = self.pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=n).collect();
+                return Ok(String::from_utf8_lossy(&line).into_owned());
+            }
+            if self.pending.len() > 64 * 1024 {
+                return Err("Kokoro: reply too long");
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err("Kokoro did not answer in time");
+            }
+            let wait = (deadline - now).min(Duration::from_millis(50));
+            let mut fd = libc::pollfd { fd: self.stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one valid pollfd for an fd we own.
+            let ready = unsafe { libc::poll(&mut fd, 1, wait.as_millis() as libc::c_int) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            match self.stdout.read(&mut buf) {
+                Ok(0) => return Err("Kokoro stopped"),
+                Ok(n) => self.pending.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err("Kokoro stopped"),
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 struct Inner {
-    worker: Option<Worker>,
+    worker: Option<ChildGuard>,
+    /// None while a sentence is in flight (or no worker).
+    io: Option<WorkerIo>,
     player: Option<ChildGuard>,
     current: Option<String>,
     used: Option<Instant>,
@@ -122,11 +164,16 @@ pub struct Speech {
     generation: AtomicU64,
     counter: AtomicU64,
     events: tokio::sync::mpsc::UnboundedSender<SpeechEvent>,
+    reply_timeout: Duration,
 }
 
 impl Speech {
     pub fn new(dirs: Dirs, events: tokio::sync::mpsc::UnboundedSender<SpeechEvent>) -> Arc<Speech> {
-        Arc::new(Speech { dirs, inner: Mutex::default(), generation: AtomicU64::new(0), counter: AtomicU64::new(0), events })
+        Speech::with_reply_timeout(dirs, events, REPLY_TIMEOUT)
+    }
+
+    pub fn with_reply_timeout(dirs: Dirs, events: tokio::sync::mpsc::UnboundedSender<SpeechEvent>, reply_timeout: Duration) -> Arc<Speech> {
+        Arc::new(Speech { dirs, inner: Mutex::default(), generation: AtomicU64::new(0), counter: AtomicU64::new(0), events, reply_timeout })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -174,62 +221,105 @@ impl Speech {
         self.generation.load(Ordering::SeqCst) == generation
     }
 
-    fn run(&self, id: &str, generation: u64, kokoro: &Kokoro, player: &Path, parts: &[String], language: &str, speed: f64) {
-        self.emit(id, "speaking", String::new());
-        for part in parts {
-            if !self.current(generation) {
-                self.emit(id, "stopped", String::new());
-                return;
-            }
-            let wav = match self.synthesize(kokoro, part, language, speed) {
-                Ok(w) => w,
-                Err(e) => {
-                    self.emit(id, "error", e);
-                    return;
-                }
-            };
-            if !self.current(generation) {
-                let _ = std::fs::remove_file(&wav);
-                self.emit(id, "stopped", String::new());
-                return;
-            }
-            let result = self.play(player, &wav);
-            let _ = std::fs::remove_file(&wav);
-            if let Err(e) = result {
-                if self.current(generation) {
-                    self.emit(id, "error", e);
-                    return;
-                }
-            }
-        }
+    /// The end of speech `id`: `current` is cleared (when it still is this one) on every path,
+    /// so Status never keeps saying "speaking" after an error.
+    fn finish(&self, id: &str, generation: u64, state: &'static str, message: String) {
         let mut inner = self.lock();
         if inner.current.as_deref() == Some(id) {
             inner.current = None;
         }
         drop(inner);
-        self.emit(id, if self.current(generation) { "done" } else { "stopped" }, String::new());
+        let state = if state == "done" && !self.current(generation) { "stopped" } else { state };
+        self.emit(id, state, message);
     }
 
-    /// One sentence into a WAV in our private runtime folder, through the resident worker.
-    fn synthesize(&self, kokoro: &Kokoro, text: &str, language: &str, speed: f64) -> Result<PathBuf, String> {
+    fn run(&self, id: &str, generation: u64, kokoro: &Kokoro, player: &Path, parts: &[String], language: &str, speed: f64) {
+        self.emit(id, "speaking", String::new());
+        for part in parts {
+            if !self.current(generation) {
+                return self.finish(id, generation, "stopped", String::new());
+            }
+            let wav = match self.synthesize(kokoro, part, language, speed, generation) {
+                Ok(w) => w,
+                Err(_) if !self.current(generation) => return self.finish(id, generation, "stopped", String::new()),
+                Err(e) => return self.finish(id, generation, "error", e),
+            };
+            if !self.current(generation) {
+                let _ = std::fs::remove_file(&wav);
+                return self.finish(id, generation, "stopped", String::new());
+            }
+            let result = self.play(player, &wav);
+            let _ = std::fs::remove_file(&wav);
+            if let Err(e) = result {
+                if self.current(generation) {
+                    return self.finish(id, generation, "error", e);
+                }
+            }
+        }
+        self.finish(id, generation, "done", String::new());
+    }
+
+    /// One sentence into a WAV in our private runtime folder, through the resident worker. The
+    /// lock is only held to take and give back the worker's pipes, never while it works.
+    fn synthesize(&self, kokoro: &Kokoro, text: &str, language: &str, speed: f64, generation: u64) -> Result<PathBuf, String> {
         static N: AtomicU64 = AtomicU64::new(0);
         let dir = crate::tempwav::private_folder(&self.dirs).map_err(|e| e.to_string())?;
         let wav = dir.join(format!("speech-{}-{}.wav", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-        let mut inner = self.lock();
-        inner.used = Some(Instant::now());
-        if !inner.worker.as_mut().is_some_and(|w| w.child.alive()) {
-            inner.worker = Some(start_worker(kokoro).map_err(|e| format!("Kokoro: {e}"))?);
-        }
-        let worker = inner.worker.as_mut().expect("worker");
+        let deadline = Instant::now() + self.reply_timeout;
+        // The worker may still be busy with a stopped speech's last sentence: wait for it.
+        let (mut io, pid) = loop {
+            let mut inner = self.lock();
+            inner.used = Some(Instant::now());
+            if !inner.worker.as_mut().is_some_and(ChildGuard::alive) {
+                inner.worker = None;
+                inner.io = None;
+                let (child, io) = start_worker(kokoro).map_err(|e| format!("Kokoro: {e}"))?;
+                inner.worker = Some(child);
+                inner.io = Some(io);
+            }
+            if let Some(io) = inner.io.take() {
+                break (io, inner.worker.as_ref().and_then(ChildGuard::pid));
+            }
+            if Instant::now() >= deadline {
+                // whoever has it is stuck: a new worker next round
+                inner.worker = None;
+                continue;
+            }
+            drop(inner);
+            if !self.current(generation) {
+                return Err("stopped".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         // The worker reads `speed` as 1.0; it takes text, voice, language and output.
         let _ = speed;
         let request = serde_json::json!({"text": text, "voice": "martin", "language": language, "output": wav});
-        let mut line = String::new();
-        let sent = writeln!(worker.stdin, "{request}").and_then(|_| worker.stdin.flush());
-        if sent.is_err() || worker.stdout.read_line(&mut line).unwrap_or(0) == 0 {
-            inner.worker = None;
-            return Err("Kokoro stopped".into());
-        }
+        let sent = writeln!(io.stdin, "{request}").and_then(|_| io.stdin.flush());
+        // Once asked, the reply is read even after a Stop (until the deadline), so the worker
+        // stays in step and can be used again; only Kokoro's own end or the deadline kill it.
+        let line = match sent {
+            Ok(()) => io.read_line(deadline),
+            Err(_) => Err("Kokoro stopped"),
+        };
+        let mut inner = self.lock();
+        let same = inner.worker.as_ref().and_then(ChildGuard::pid) == pid && pid.is_some();
+        let line = match line {
+            Ok(line) => {
+                if same {
+                    inner.io = Some(io);
+                }
+                line
+            }
+            Err(e) => {
+                if same {
+                    inner.worker = None; // killed and reaped (ChildGuard)
+                }
+                drop(inner);
+                let _ = std::fs::remove_file(&wav);
+                return Err(e.into());
+            }
+        };
+        drop(inner);
         let reply: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
         if reply.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
             let _ = std::fs::remove_file(&wav);
@@ -279,15 +369,18 @@ impl Speech {
     /// Ends the worker (frees Kokoro's memory) when unused for `idle`.
     pub fn unload_if_idle(&self, idle: Duration) -> bool {
         let mut inner = self.lock();
-        if inner.current.is_some() || inner.used.is_some_and(|t| t.elapsed() < idle) {
+        if inner.current.is_some() || inner.io.is_none() || inner.used.is_some_and(|t| t.elapsed() < idle) {
             return false;
         }
+        inner.io = None;
         inner.worker.take().is_some()
     }
 
     pub fn shutdown(&self) {
         self.stop();
-        self.lock().worker = None;
+        let mut inner = self.lock();
+        inner.io = None;
+        inner.worker = None;
     }
 }
 
@@ -295,7 +388,7 @@ fn player(dirs: &Dirs) -> Option<PathBuf> {
     ["pw-play", "paplay", "aplay"].iter().find_map(|p| dirs.which(p))
 }
 
-fn start_worker(kokoro: &Kokoro) -> std::io::Result<Worker> {
+fn start_worker(kokoro: &Kokoro) -> std::io::Result<(ChildGuard, WorkerIo)> {
     let mut command = Command::new(&kokoro.python);
     command
         .arg(&kokoro.script)
@@ -309,8 +402,8 @@ fn start_worker(kokoro: &Kokoro) -> std::io::Result<Worker> {
     }
     let mut child = crate::procs::spawn(command)?;
     let stdin = child.stdin.take().ok_or_else(|| std::io::Error::other("no stdin"))?;
-    let stdout = BufReader::new(child.stdout.take().ok_or_else(|| std::io::Error::other("no stdout"))?);
-    Ok(Worker { child: ChildGuard(Some(child)), stdin, stdout })
+    let stdout = child.stdout.take().ok_or_else(|| std::io::Error::other("no stdout"))?;
+    Ok((ChildGuard(Some(child)), WorkerIo { stdin, stdout, pending: Vec::new() }))
 }
 
 #[cfg(test)]
@@ -348,6 +441,77 @@ mod tests {
         assert_eq!(find_kokoro(&rt), Err("no_kokoro_model"));
         std::fs::write(rt.join("kokoro/kokoro-martin.onnx"), "x").unwrap();
         assert!(find_kokoro(&rt).is_ok());
+    }
+
+    /// A Kokoro runtime whose worker is `worker` (Python), and a fake player.
+    fn fake_runtime(t: &TestDir, worker: &str) -> Dirs {
+        let rt = t.path().join("home/.local/share/kindle-reader");
+        for d in ["app", "kokoro", "venv/bin"] {
+            std::fs::create_dir_all(rt.join(d)).unwrap();
+        }
+        std::fs::write(rt.join("kokoro/kokoro-martin.onnx"), "x").unwrap();
+        std::fs::write(rt.join("app/kokoro_tts.py"), worker).unwrap();
+        std::os::unix::fs::symlink(PathBuf::from("/usr/bin/python3"), rt.join("venv/bin/python")).unwrap();
+        let bin = t.script("pw-play", "#!/bin/sh\nsleep 0.05\n");
+        Dirs::rooted(t.path(), &format!("{}:/usr/bin:/bin", bin.display()))
+    }
+
+    fn end_state(rx: &mut tokio::sync::mpsc::UnboundedReceiver<SpeechEvent>, id: &str, within: Duration) -> (&'static str, String) {
+        let start = Instant::now();
+        while start.elapsed() < within {
+            match rx.try_recv() {
+                Ok(SpeechEvent::State { id: i, state, message }) if i == id && state != "speaking" => return (state, message),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        ("none", String::new())
+    }
+
+    /// A worker that never answers: Stop, Status and a new Speak don't wait for it; the
+    /// deadline kills it and the speech ends with an error that clears `speaking`.
+    #[test]
+    fn hung_worker_never_blocks() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let t = TestDir::new("speak-hung");
+        let dirs = fake_runtime(&t, "import sys,time\nfor line in sys.stdin:\n time.sleep(600)\n");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let speech = Speech::with_reply_timeout(dirs, tx, Duration::from_millis(1500));
+        let id = speech.speak("One.", "de", 1.0).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        speech.stop();
+        assert!(!speech.speaking());
+        assert!(started.elapsed() < Duration::from_millis(200), "stop waited for Kokoro");
+        assert_eq!(end_state(&mut rx, &id, Duration::from_secs(1)).0, "stopped");
+        // a new speech: the hung worker is killed at the deadline, the next one hangs too and
+        // the speech ends with an error, `speaking` false again
+        let id = speech.speak("Two.", "de", 1.0).unwrap();
+        assert!(speech.speaking());
+        let (state, message) = end_state(&mut rx, &id, Duration::from_secs(8));
+        assert_eq!(state, "error", "{message}");
+        assert!(!speech.speaking());
+        speech.shutdown();
+    }
+
+    /// Kokoro answers with an error: the speech ends `error` and is no longer `speaking`.
+    #[test]
+    fn worker_error_clears_speaking() {
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let t = TestDir::new("speak-err");
+        let dirs = fake_runtime(&t, "import sys,json\nfor line in sys.stdin:\n print(json.dumps({'code':1,'error':'bad voice'}),flush=True)\n");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let speech = Speech::new(dirs, tx);
+        let id = speech.speak("One. Two.", "de", 1.0).unwrap();
+        assert_eq!(end_state(&mut rx, &id, Duration::from_secs(5)), ("error", "bad voice".to_string()));
+        assert!(!speech.speaking());
+        // the worker answered, so it is kept and can be unloaded when idle
+        assert!(speech.unload_if_idle(Duration::ZERO));
+        speech.shutdown();
     }
 
     /// A fake worker (writes a short WAV per request) and a fake player: speak plays every

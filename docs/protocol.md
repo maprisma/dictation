@@ -46,6 +46,7 @@ Stop without text (`Closed("cancelled")`).
 - Only the German "Martin" voice is installed by default. It reads English too, with an accent.
 - `options`: `language` (`auto`/`de` → German, `en` → English).
 - A new `Speak`, `StopSpeaking` or `StartSession` stops the current speech at once.
+- Kokoro gets 60 s per sentence (the first one loads the model); a worker that takes longer is killed and the speech ends with `error`. The service never waits on Kokoro while holding its state, so `StopSpeaking`, `Status` and `StartSession` answer at once even while a sentence is being made. After `done`, `stopped` or `error`, `speaking` is false.
 - It is refused while a session is listening.
 - Errors: `NotReady`, with `speech_why_not` being `no_kokoro`, `no_kokoro_model` or `no_player`.
 
