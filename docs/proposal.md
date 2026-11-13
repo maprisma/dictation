@@ -8,7 +8,7 @@
 
 Goal: **one shared voice service for all Maprisma apps**, plus a **voice/typing overlay** in which you ask an
 AI to do things on the desktop ("open Firefox", "how is the weather in Berlin", "switch to dark theme").
-Its settings live in a new **Maprisma Manager** category. The design draws on:
+Its settings live in a new **Maprisma Settings** category. The design draws on:
 - a survey of the existing code (below);
 - web research;
 - Antigravity's design advice (`research/antigravity-design.md`).

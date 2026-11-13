@@ -544,7 +544,7 @@ impl Overlay {
             .ok()
             .flatten();
             let Some(chosen) = found else {
-                return (Err(tr("No AI helper is installed. Choose one in Maprisma Manager → AI.")), String::new());
+                return (Err(tr("No AI helper is installed. Choose one in Maprisma Settings → AI.")), String::new());
             };
             let name = chosen.installed.helper.name.clone();
             let prompt = helper::build_prompt(&question, context.as_ref(), &language, &desktop, actions);

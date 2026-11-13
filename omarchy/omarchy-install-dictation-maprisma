@@ -2,7 +2,7 @@
 
 # omarchy:summary=Use Maprisma Dictation for Omarchy's dictation keys
 # Selects Maprisma Dictation as Omarchy's dictation backend once its voice service is ready
-# (install it from github.com/maprisma/dictation, or through Maprisma Manager › Voice).
+# (install it from github.com/maprisma/dictation, or through Maprisma Settings › Voice).
 
 voice=$(command -v maprisma-voice || true)
 [[ -n $voice ]] || voice="$HOME/.local/bin/maprisma-voice"

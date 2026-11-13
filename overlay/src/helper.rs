@@ -1,4 +1,4 @@
-//! Asking the shared AI helper (Maprisma Manager → AI) one question.
+//! Asking the shared AI helper (Maprisma Settings → AI) one question.
 //!
 //! The helpers come from Maprisma's catalog (`/usr/lib/maprisma/data/helpers.json` when it parses
 //! and is at least as new as the copy shipped here, `data/helpers.json`), the same file the
@@ -367,7 +367,7 @@ pub async fn run(argv: Vec<String>, stdin_prompt: Option<String>, work: PathBuf,
 pub async fn run_with(argv: Vec<String>, stdin_prompt: Option<String>, work: PathBuf, timeout: Duration, started: impl FnOnce(i32)) -> Result<String, String> {
     use maprisma_voice::i18n::{tr, trf};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let Some(program) = argv.first() else { return Err(tr("No AI helper is installed. Choose one in Maprisma Manager → AI.")) };
+    let Some(program) = argv.first() else { return Err(tr("No AI helper is installed. Choose one in Maprisma Settings → AI.")) };
     if stdin_prompt.is_none() && argv.iter().any(|a| a.len() > ARGV_PROMPT_MAX) {
         return Err(tr("The question is too long for this helper."));
     }

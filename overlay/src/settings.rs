@@ -1,6 +1,6 @@
 //! The overlay's settings, `$XDG_CONFIG_HOME/maprisma-dictation/settings.json` (a JSON object;
 //! a missing or broken file or value falls back to the default). The overlay only reads them;
-//! Maprisma Manager's Voice page (step 2) writes them, keeping keys it doesn't know.
+//! Maprisma Settings' Voice page (step 2) writes them, keeping keys it doesn't know.
 //!
 //! | key | default | meaning |
 //! |---|---|---|

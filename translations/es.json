@@ -67,7 +67,7 @@
  "Moved {0} to workspace {1}": "{0} movido al espacio de trabajo {1}",
  "Mute": "Silenciar",
  "Next track": "Pista siguiente",
- "No AI helper is installed. Choose one in Maprisma Manager → AI.": "No hay ningún asistente de IA instalado. Elige uno en Maprisma Manager → IA.",
+ "No AI helper is installed. Choose one in Maprisma Settings → AI.": "No hay ningún asistente de IA instalado. Elige uno en Maprisma Settings → IA.",
  "No Whisper model was found.": "No se encontró ningún modelo de Whisper.",
  "No audio player (pw-play, paplay or aplay) was found.": "No se encontró ningún reproductor de audio (pw-play, paplay o aplay).",
  "No audio recorder (pw-record, parecord or arecord) was found.": "No se encontró ningún grabador de audio (pw-record, parecord o arecord).",

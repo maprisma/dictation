@@ -75,7 +75,7 @@ fn spawn(command: Command) {
 }
 
 impl Applet {
-    /// The overlay's settings: language and corners (Maprisma Manager's Voice page writes them).
+    /// The overlay's settings: language and corners (Maprisma Settings' Voice page writes them).
     fn reload(&mut self) {
         let s = settings::read();
         maprisma_voice::i18n::set_language(&s.language);

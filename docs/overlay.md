@@ -1,7 +1,7 @@
 # Maprisma Dictation: the overlay (steps 4–6)
 
 `maprisma-dictation` is a small pill at the top centre of the screen. You speak or type a question,
-the AI helper you chose in Maprisma Manager → AI answers, and the answer shows in the pill. The
+the AI helper you chose in Maprisma Settings → AI answers, and the answer shows in the pill. The
 helper can also propose **actions** ("open Firefox", "how is the weather in Berlin", "switch to dark
 theme"), which the overlay carries out itself with typed tools, never a shell (see [Actions](#actions)).
 It can read its answers aloud (`speak_answers`).
@@ -16,7 +16,7 @@ maprisma-dictation --wake [--ask-rest TEXT]   # started by maprisma-voice when i
 ```
 
 ### The wake phrase (`--wake`)
-With maprisma-voice's `wake_enabled` on, saying the phrase ("Hey Linux", set in Maprisma Manager's
+With maprisma-voice's `wake_enabled` on, saying the phrase ("Hey Linux", set in Maprisma Settings'
 Voice page or `maprisma-voice set wake_phrase …`, see [protocol.md](protocol.md#the-wake-phrase))
 starts `maprisma-dictation --wake`:
 
@@ -111,7 +111,7 @@ one, else the smallest).
 ## Settings
 
 `~/.config/maprisma-dictation/settings.json` (a missing or broken value is the default). The
-overlay only reads it; Maprisma Manager's Voice page (step 2) will write it.
+overlay only reads it; Maprisma Settings' Voice page (step 2) will write it.
 
 | key | default | |
 |---|---|---|
@@ -226,7 +226,7 @@ KDE's commands are built and tested but not tried on a live Plasma session yet.
 **The log**: every executed, undone, blocked, rejected, cancelled or failed action is appended to
 `~/.local/state/maprisma-dictation/actions.jsonl` (folder 0700, file 0600; at 1 MB it moves to
 `actions.jsonl.1`): `{"time", "request" (cut at 300 characters), "action", "level", "result", "detail"}`.
-Maprisma Manager will show it.
+Maprisma Settings will show it.
 
 ## Spoken answers
 
@@ -267,7 +267,7 @@ so on KDE it is **toggle only**.
 COSMIC's custom shortcuts have no release action either: **toggle only**.
 
 There is no `--bind-key`: writing three desktops' key settings (kglobalaccel, COSMIC's RON file,
-Hyprland's Lua) from here risks clobbering the user's own bindings. Maprisma Manager's Voice page
+Hyprland's Lua) from here risks clobbering the user's own bindings. Maprisma Settings' Voice page
 (step 2, "key and mode") will set it through the Launcher's existing shortcut code for each desktop.
 
 ## The bar icon
@@ -280,7 +280,7 @@ key and the Launcher take the same path (`src/bar.rs`).
 |---|---|---|---|
 | Program | `maprisma-dictation-applet`, applet `io.github.ubruckhaus.CosmicMaprismaDictation` (add it in Settings › Desktop › Panel › Applets) | `maprisma-dictation-tray`, an SNI with Id `maprisma-dictation`, autostart `OnlyShowIn=KDE;Hyprland;` | the same tray, shown by the shell's tray (`tray:maprisma-dictation` in bar.json) |
 | Left click | open (and listen) / close | the same | the same |
-| Right click | a menu: Open/Close dictation, Voice settings… (`maprisma-manager --page voice`); Esc closes it | the same menu, plus Quit tray | the same as KDE |
+| Right click | a menu: Open/Close dictation, Voice settings… (`maprisma-settings --page voice`); Esc closes it | the same menu, plus Quit tray | the same as KDE |
 | Middle click | – | – | – |
 
 Its title starts with "Maprisma" in every language, so KDE's "Maprisma Icons" widget picks it up

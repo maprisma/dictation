@@ -7,7 +7,7 @@ The design is in [proposal.md](proposal.md). Each step gets its own branch and t
    - whisper.cpp v1.9.5 with Vulkan; idle unloading of the GPU model.
    - Checked live: German and English test sentences give the right text, end to end over D-Bus, with live partial text and finishing on silence.
    - whisper.cpp v1.9.5 also ships `parakeet-cli`/libparakeet, a possible faster engine later (untested).
-2. **Maprisma Manager, "Voice" category:** on/off, engine (install), model (download/remove), language, microphone with a level meter, key and mode, assistant options.
+2. **Maprisma Settings, "Voice" category:** on/off, engine (install), model (download/remove), language, microphone with a level meter, key and mode, assistant options.
 3. **Mic buttons:** on the Ask AI pages of Launcher, Theme, Manager, Playground and Maprisma, and wherever the Shell or the Notifier has a text field.
    - They use one small client per toolkit (Dart, Rust, QML).
    - Partial text is shown greyed and replaced by the final text.
@@ -27,7 +27,7 @@ The design is in [proposal.md](proposal.md). Each step gets its own branch and t
    - Levels: 0 runs with an Undo chip (apps, URLs, do not disturb, light/dark, volume, media, workspaces, weather), 1 waits for Enter on an amber card (close window, `run_command`), 2 is blocked (sudo, packages, deleting, autostart, secrets — also inside `run_command`'s argv). Outside text (a weather result, pasted text) makes later actions need Enter.
    - Weather card from Open-Meteo; the log in `~/.local/state/maprisma-dictation/actions.jsonl`; settings `actions`, `confirm_all`, `weather_location`.
    - Checked live on Hyprland (4K): "open Firefox", "how is the weather in Berlin" / "wie ist das Wetter in Hamburg?", the `run_command` card (cancelled), and `uname -r` confirmed through the real helper in a test harness.
-   - Follow-ups: the action log in Maprisma Manager; KDE's workspace/window commands on a live Plasma session; COSMIC has no workspace/window interface for other apps; `write_file`/`move_file` left out.
+   - Follow-ups: the action log in Maprisma Settings; KDE's workspace/window commands on a live Plasma session; COSMIC has no workspace/window interface for other apps; `write_file`/`move_file` left out.
 6. **Spoken answers.** The service part is done, 2026-11-13: `Speak`/`StopSpeaking`, the `Speaking` signal and `maprisma-voice speak`. Checked live: Kokoro speaks two German sentences in 1.5 s, and Whisper transcribes them back word for word. The overlay's part is on branch `step-5-actions`: the `speak_answers` setting (off by default), `StopSpeaking` on Esc, closing or a new question/voice session, and a gently pulsing ring while it speaks; checked end to end on a private bus with a fake `pw-play`. The Narrator stays on its own.
 7. **Omarchy.** The adapter is done, 2026-11-13: `omarchy-dictation-maprisma` and `omarchy-install-dictation-maprisma` ([omarchy.md](omarchy.md)); not yet tried on a real Omarchy.
    - **The wake phrase** (instead of openWakeWord): built on branch `wake-phrase`, 2026-11-13 (not merged or installed yet). `wake_enabled` (off by default), `wake_phrase` ("Hey Linux"), `wake_language`, `wake_model`, `wake_sensitivity`; the daemon's wake listener (`src/wake.rs`): energy-cut stretches of speech → a small local Whisper on its own CPU-only whisper-server → fuzzy match → `Wake(phrase, rest)` and `maprisma-dictation --wake [--ask-rest REST]`. Sessions always win the microphone; `WakeTest` / `maprisma-voice wake test` for the Manager's "Try the phrase"; a bar-icon state.

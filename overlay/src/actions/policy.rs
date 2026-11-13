@@ -193,6 +193,7 @@ fn blocked_plain(argv: &[String]) -> Option<&'static str> {
         || (["pip", "pip3", "pipx", "uv", "gem", "go"].contains(&p) && has(argv, &["install", "uninstall", "remove", "add", "upgrade"]))
         || (p == "cargo" && has(argv, &["install", "uninstall"]))
         || (["npm", "pnpm", "yarn", "bun"].contains(&p) && (has(argv, &["-g", "--global", "global"])))
+        || p == "maprisma-settings-core"
         || p == "maprisma-manager-core"
     {
         return Some(WHY_PACKAGES);
@@ -318,6 +319,8 @@ mod tests {
             ("flatpak install flathub x", WHY_PACKAGES),
             ("pip install requests", WHY_PACKAGES),
             ("npm i -g x", WHY_PACKAGES),
+            ("maprisma-settings-core update wlan", WHY_PACKAGES),
+            ("maprisma-manager-core update wlan", WHY_PACKAGES),
             ("rm -rf /tmp/x", WHY_DELETE),
             ("find . -name x -delete", WHY_DELETE),
             ("find . -exec rm {} ;", WHY_DELETE),

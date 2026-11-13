@@ -343,7 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Action::Settings => {
                     if let Err(e) = bar::settings_command().spawn() {
-                        eprintln!("maprisma-dictation-tray: could not start maprisma-manager: {e}");
+                        eprintln!("maprisma-dictation-tray: could not start maprisma-settings: {e}");
                     }
                 }
                 Action::Quit => return Ok(()),

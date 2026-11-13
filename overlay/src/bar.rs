@@ -25,7 +25,7 @@ use std::time::Duration;
 pub const APP_ID: &str = "io.github.ubruckhaus.CosmicMaprismaDictation";
 /// The tray's own bus name (one tray per session).
 pub const TRAY_NAME: &str = "io.github.ubruckhaus.CosmicMaprismaDictation.Tray";
-/// The StatusNotifierItem `Id` (Maprisma Manager's `kdeId`, Maprisma Shell's `tray:<id>`).
+/// The StatusNotifierItem `Id` (Maprisma Settings' `kdeId`, Maprisma Shell's `tray:<id>`).
 pub const SNI_ID: &str = "maprisma-dictation";
 
 pub const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-symbolic";
@@ -178,9 +178,9 @@ pub fn toggle_command(exe: Option<&Path>, home: &Path) -> Command {
     Command { program: overlay_program(exe, home), args: vec!["--toggle".into()] }
 }
 
-/// "Voice settings…": Maprisma Manager's Voice page.
+/// "Voice settings…": Maprisma Settings' Voice page.
 pub fn settings_command() -> Command {
-    Command { program: PathBuf::from("maprisma-manager"), args: vec!["--page".into(), "voice".into()] }
+    Command { program: PathBuf::from("maprisma-settings"), args: vec!["--page".into(), "voice".into()] }
 }
 
 impl Command {
@@ -473,7 +473,7 @@ mod tests {
         std::fs::create_dir_all(&apps).unwrap();
         std::fs::write(apps.join(format!("{ICON}.svg")), "<svg/>").unwrap();
         assert_eq!(icon_theme_path(Some(&tray)), root.join("prefix/share/icons").to_string_lossy());
-        assert_eq!(settings_command(), Command { program: "maprisma-manager".into(), args: vec!["--page".into(), "voice".into()] });
+        assert_eq!(settings_command(), Command { program: "maprisma-settings".into(), args: vec!["--page".into(), "voice".into()] });
     }
 
     #[test]

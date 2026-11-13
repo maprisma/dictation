@@ -67,7 +67,7 @@
  "Moved {0} to workspace {1}": "{0} naar werkblad {1} verplaatst",
  "Mute": "Dempen",
  "Next track": "Volgend nummer",
- "No AI helper is installed. Choose one in Maprisma Manager → AI.": "Er is geen AI-helper geïnstalleerd. Kies er een in Maprisma Manager → AI.",
+ "No AI helper is installed. Choose one in Maprisma Settings → AI.": "Er is geen AI-helper geïnstalleerd. Kies er een in Maprisma Settings → AI.",
  "No Whisper model was found.": "Er is geen Whisper-model gevonden.",
  "No audio player (pw-play, paplay or aplay) was found.": "Er is geen audiospeler (pw-play, paplay of aplay) gevonden.",
  "No audio recorder (pw-record, parecord or arecord) was found.": "Er is geen audiorecorder (pw-record, parecord of arecord) gevonden.",

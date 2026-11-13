@@ -6,7 +6,7 @@ One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hypr
   - It records the microphone while an app asks, notices when you stop talking and turns the speech into text.
   - It runs on your own PC by default: whisper.cpp with Vulkan, keeping the model loaded in memory. Online engines and external dictation apps can be used instead.
 - **`maprisma-dictation`** is the overlay: a pill at the top centre with an aura ring. Speak or type
-  a question and the AI helper you chose in Maprisma Manager → AI answers. Bind a key to
+  a question and the AI helper you chose in Maprisma Settings → AI answers. Bind a key to
   `maprisma-dictation --toggle` (details, hold-to-talk and the key per desktop: [docs/overlay.md](docs/overlay.md)).
   It can also act: open apps and web pages, switch workspaces, light/dark, do not disturb,
   volume and media, and show the weather; closing windows and commands wait for Enter, and
@@ -17,7 +17,7 @@ One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hypr
   a COSMIC panel applet (`maprisma-dictation-applet`) and a tray icon on KDE Plasma and Hyprland
   (`maprisma-dictation-tray`). It shows when the microphone listens or an answer is read aloud.
 - **Coming next:**
-  - the Voice settings in Maprisma Manager (with the action log);
+  - the Voice settings in Maprisma Settings (with the action log);
   - a mic button on every Ask AI page.
   - See [docs/plan.md](docs/plan.md) and [docs/proposal.md](docs/proposal.md).
 
