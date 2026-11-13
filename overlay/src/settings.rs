@@ -11,6 +11,10 @@
 //! | `end` | `silence` | how a tapped (toggle) session ends: `silence` or `release` |
 //! | `screenshot_key` | `true` | F12 saves a picture of the overlay to ~/Pictures/Maprisma Dictation/ |
 //! | `keyboard` | `on_demand` | layer-shell keyboard mode: `on_demand`, or `exclusive` for a compositor that doesn't focus the overlay |
+//! | `actions` | `true` | the helper may propose desktop actions (docs/overlay.md "Actions"); false: answers only |
+//! | `confirm_all` | `false` | every action waits for Enter (read-only weather lookups excepted) |
+//! | `weather_location` | `""` | the place for "how is the weather" without one (empty: the time zone's city) |
+//! | `speak_answers` | `false` | read answers aloud through maprisma-voice's `Speak` |
 
 use serde_json::Value;
 
@@ -25,6 +29,10 @@ pub struct Settings {
     pub end_silence: bool,
     pub screenshot_key: bool,
     pub keyboard_exclusive: bool,
+    pub actions: bool,
+    pub confirm_all: bool,
+    pub weather_location: String,
+    pub speak_answers: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +44,7 @@ pub enum Motion {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { language: "system".into(), corners: "desktop".into(), motion: Motion::Desktop, listen: true, end_silence: true, screenshot_key: true, keyboard_exclusive: false }
+        Settings { language: "system".into(), corners: "desktop".into(), motion: Motion::Desktop, listen: true, end_silence: true, screenshot_key: true, keyboard_exclusive: false, actions: true, confirm_all: false, weather_location: String::new(), speak_answers: false }
     }
 }
 
@@ -65,6 +73,13 @@ pub fn parse(bytes: &[u8]) -> Settings {
         s.screenshot_key = b;
     }
     s.keyboard_exclusive = text("keyboard") == Some("exclusive");
+    let flag = |k: &str, d: bool| map.get(k).and_then(Value::as_bool).unwrap_or(d);
+    s.actions = flag("actions", s.actions);
+    s.confirm_all = flag("confirm_all", s.confirm_all);
+    s.speak_answers = flag("speak_answers", s.speak_answers);
+    if let Some(place) = text("weather_location").map(str::trim).filter(|p| p.chars().count() <= 100 && !p.chars().any(char::is_control)) {
+        s.weather_location = place.into();
+    }
     s
 }
 
@@ -142,9 +157,25 @@ mod tests {
     fn defaults_and_broken_values() {
         assert_eq!(parse(b""), Settings::default());
         assert_eq!(parse(b"[1]"), Settings::default());
-        let s = parse(br#"{"language": "de", "corners": "square", "motion": "reduced", "listen": false, "end": "release", "screenshot_key": false, "keyboard": "exclusive", "other": 1}"#);
-        assert_eq!(s, Settings { language: "de".into(), corners: "square".into(), motion: Motion::Reduced, listen: false, end_silence: false, screenshot_key: false, keyboard_exclusive: true });
-        let s = parse(br#"{"language": "xx", "corners": "bogus", "motion": 3, "listen": "no"}"#);
+        let s = parse(br#"{"language": "de", "corners": "square", "motion": "reduced", "listen": false, "end": "release", "screenshot_key": false, "keyboard": "exclusive", "other": 1,
+            "actions": false, "confirm_all": true, "weather_location": " Hamburg ", "speak_answers": true}"#);
+        assert_eq!(
+            s,
+            Settings {
+                language: "de".into(),
+                corners: "square".into(),
+                motion: Motion::Reduced,
+                listen: false,
+                end_silence: false,
+                screenshot_key: false,
+                keyboard_exclusive: true,
+                actions: false,
+                confirm_all: true,
+                weather_location: "Hamburg".into(),
+                speak_answers: true
+            }
+        );
+        let s = parse(br#"{"language": "xx", "corners": "bogus", "motion": 3, "listen": "no", "actions": "no", "speak_answers": 1, "weather_location": 5}"#);
         assert_eq!(s, Settings::default());
     }
 

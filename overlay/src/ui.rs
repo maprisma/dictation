@@ -3,13 +3,15 @@
 //! would lose nothing, a transparent full-screen layer under it that catches clicks outside.
 //! The decisions are in state.rs, the ring's maths in aura.rs; this file draws and wires.
 
+use crate::actions::exec::{self, Outcome, Target};
+use crate::actions::{self, State as ItemState, Turn, policy, schema};
 use crate::aura::{self, AuraColors, Envelope, Tone};
 use crate::helper::{self, Exchange};
 use crate::instance::Command;
 use crate::markdown::{self, Block};
 use crate::settings::{self, Settings};
 use crate::state::{Effect, End, Event, Machine, Phase};
-use crate::voice::{self, Control, Controls, VoiceEvent};
+use crate::voice::{self, Control, Controls, SpeakEvent, VoiceEvent};
 use crate::{corners, look, shot};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
@@ -55,6 +57,8 @@ pub struct Flags {
     pub hold: bool,
     /// `--demo`: made-up levels, speech and answer; no voice service or helper is used.
     pub demo: bool,
+    /// `--ask TEXT`: open without listening and send this question at once.
+    pub ask: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +82,19 @@ pub enum Message {
     ClearStatus(u64),
     /// The answer's measured height.
     BodySize(Size),
+    /// The windows the answer's actions aim at were looked up.
+    Prepared(u64, Vec<Target>),
+    /// An action finished (turn, item).
+    ActionDone(u64, usize, Outcome),
+    /// The Run / Cancel buttons on the amber card (a click is a physical confirmation too).
+    ConfirmClicked,
+    CancelClicked,
+    /// Undo for this item, or (Ctrl+Z) the newest one.
+    Undo(Option<usize>),
+    UndoDone(u64, usize, Result<(), String>),
+    /// One of several matching apps was picked.
+    Pick(usize, usize),
+    Speak(u64, SpeakEvent),
 }
 
 pub struct Overlay {
@@ -119,6 +136,17 @@ pub struct Overlay {
     capturing: bool,
     /// The body's measured height (None until laid out).
     body_height: Option<f32>,
+    // actions
+    /// The answer as shown: without the actions block.
+    shown: String,
+    turn: Turn,
+    turn_gen: u64,
+    /// The request carries outside text (pasted, or a follow-up of a weather lookup).
+    tainted: bool,
+    // spoken answers
+    speak_gen: u64,
+    speak: Option<(String, String)>,
+    speaking_since: Option<Instant>,
 }
 
 fn rgb(c: Color) -> aura::Rgb {
@@ -135,6 +163,18 @@ fn off_thread<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send
         let _ = sender.send(work());
     });
     Task::perform(receiver, move |result| cosmic::Action::App(done(result.unwrap_or_else(|_| Err("failed".into())))))
+}
+
+/// Blocking work on a thread of its own; `done` turns its result into a message.
+fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl Fn(T) -> Message + Send + 'static) -> Task<Message> {
+    let (sender, receiver) = cosmic::iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    Task::perform(receiver, move |result| match result {
+        Ok(value) => cosmic::Action::App(done(value)),
+        Err(_) => cosmic::Action::App(Message::Frame),
+    })
 }
 
 /// The answer's height in the pill (a rough line count; the body scrolls when it is more).
@@ -192,7 +232,12 @@ impl Overlay {
         } else {
             Some(End::Release)
         };
-        let effects = self.machine.handle(Event::Opened { listen });
+        let listen = if self.flags.ask.is_some() { None } else { listen };
+        let mut effects = self.machine.handle(Event::Opened { listen });
+        if let Some(question) = self.flags.ask.take() {
+            self.machine.handle(Event::Typed(question));
+            effects.extend(self.machine.handle(Event::Submit));
+        }
         let zone = self.update_zone(true);
         Task::batch([get_layer_surface(self.layer_settings(id)), zone, cosmic::widget::text_input::focus(INPUT_ID.clone()), self.run(effects)])
     }
@@ -323,13 +368,27 @@ impl Overlay {
                 }
                 Effect::Ask(question) => {
                     self.body_height = None;
+                    self.end_turn();
                     tasks.push(self.ask(question));
                 }
+                Effect::Confirm => {
+                    if let Some(i) = self.turn.confirm() {
+                        tasks.push(self.execute(i));
+                    }
+                    self.sync_card();
+                }
+                Effect::CancelConfirm => {
+                    self.turn.cancel(crate::last::now());
+                    tasks.push(self.pump());
+                }
+                Effect::StopSpeaking => tasks.push(self.stop_speaking()),
                 Effect::CancelAsk => self.cancel_ask(),
                 Effect::FlashDone => self.done_at = Some(Instant::now()),
                 Effect::FlashError => self.error_at = Some(Instant::now()),
                 Effect::Close => {
                     self.cancel_ask();
+                    self.end_turn();
+                    let stop = if self.speak.is_some() || self.machine.speaking { Some(self.stop_speaking()) } else { None };
                     if let Some(c) = self.controls.take() {
                         let _ = c.0.send(Control::Cancel);
                     }
@@ -340,8 +399,11 @@ impl Overlay {
                     if let Some(id) = self.surface.take() {
                         close.push(destroy_layer_surface(id));
                     }
-                    // Give the Cancel a moment to reach the service, then leave.
-                    close.push(Task::perform(tokio::time::sleep(Duration::from_millis(60)), |_| cosmic::Action::App(Message::Frame)).chain(cosmic::iced::exit()));
+                    if let Some(stop) = stop {
+                        close.push(stop);
+                    }
+                    // Give the Cancel (and StopSpeaking) a moment to reach the service, then leave.
+                    close.push(Task::perform(tokio::time::sleep(Duration::from_millis(if self.speak_gen > 0 { 300 } else { 60 })), |_| cosmic::Action::App(Message::Frame)).chain(cosmic::iced::exit()));
                     return Task::batch(close);
                 }
             }
@@ -363,6 +425,8 @@ impl Overlay {
         self.cancel_ask();
         let generation = self.ask_gen;
         let context = helper::follow_up(self.last.as_ref(), crate::last::now()).cloned();
+        self.tainted = context.as_ref().is_some_and(|e| e.tainted) || policy::looks_pasted(&question);
+        let actions = self.settings.actions;
         let language = ui_language(&self.settings.language);
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into());
         let demo = self.flags.demo;
@@ -382,7 +446,7 @@ impl Overlay {
                 return (Err(tr("No AI helper is installed. Choose one in Maprisma Manager → AI.")), String::new());
             };
             let name = chosen.installed.helper.name.clone();
-            let prompt = helper::build_prompt(&question, context.as_ref(), &language, &desktop);
+            let prompt = helper::build_prompt(&question, context.as_ref(), &language, &desktop, actions);
             let stdin = chosen.installed.helper.stdin.then(|| prompt.clone());
             let argv = helper::ask_argv(&chosen, &prompt);
             let work = match crate::paths::runtime_dir() {
@@ -398,6 +462,74 @@ impl Overlay {
         let (task, handle) = Task::perform(work, move |(result, name)| cosmic::Action::App(Message::Answer(generation, result, name))).abortable();
         self.ask = Some(handle);
         task
+    }
+
+    fn context(&self) -> exec::Context {
+        exec::Context { desktop: look::desktop(), language: ui_language(&self.settings.language), weather_location: self.settings.weather_location.clone() }
+    }
+
+    fn flush_log(&mut self) {
+        for e in self.turn.log.drain(..) {
+            actions::log::append(&e);
+        }
+    }
+
+    fn sync_card(&mut self) {
+        self.machine.confirming = self.turn.confirming().is_some();
+    }
+
+    /// A new question or closing: what is left of the last answer's actions doesn't run.
+    fn end_turn(&mut self) {
+        self.turn.cancel_all(crate::last::now());
+        self.flush_log();
+        self.turn = Turn::default();
+        self.turn_gen += 1;
+        self.shown.clear();
+        self.sync_card();
+    }
+
+    /// Starts the next action (or shows its card).
+    fn pump(&mut self) -> Task<Message> {
+        self.flush_log();
+        let task = match self.turn.advance() {
+            actions::Next::Run(i) => self.execute(i),
+            _ => Task::none(),
+        };
+        self.flush_log();
+        self.sync_card();
+        self.save_last();
+        Task::batch([task, self.update_zone(false), self.sync_catcher()])
+    }
+
+    fn execute(&self, i: usize) -> Task<Message> {
+        let Some(item) = self.turn.items.get(i) else { return Task::none() };
+        let (Some(action), target, ctx, generation) = (item.action.clone(), item.target.clone(), self.context(), self.turn_gen) else { return Task::none() };
+        blocking(move || exec::execute(&action, &target, &ctx), move |outcome| Message::ActionDone(generation, i, outcome))
+    }
+
+    /// The last exchange with what the actions did (a follow-up's helper sees the results).
+    fn save_last(&mut self) {
+        if self.flags.demo || self.machine.answer.is_empty() || self.machine.question.is_empty() {
+            return;
+        }
+        let context = self.turn.context();
+        let answer = match (self.shown.is_empty(), context.is_empty()) {
+            (_, true) => self.shown.clone(),
+            (true, false) => context,
+            (false, false) => format!("{}\n\n{context}", self.shown),
+        };
+        let e = Exchange { question: self.machine.question.clone(), answer, tainted: self.turn.read_outside() || self.tainted, at: crate::last::now() };
+        if self.last.as_ref() != Some(&e) {
+            crate::last::save(&e);
+            self.last = Some(e);
+        }
+    }
+
+    fn stop_speaking(&mut self) -> Task<Message> {
+        self.speak = None;
+        self.speaking_since = None;
+        self.machine.speaking = false;
+        Task::perform(voice::stop_speaking(), |_| cosmic::Action::App(Message::Frame))
     }
 
     fn set_status(&mut self, text: String) -> Task<Message> {
@@ -417,7 +549,7 @@ impl Overlay {
         if self.reduced {
             return flashing || self.voice_on.is_some() || self.envelope.value > 0.01;
         }
-        flashing || matches!(self.machine.phase, Phase::Listening | Phase::Transcribing | Phase::Thinking) || self.envelope.value > 0.01
+        flashing || self.machine.speaking || matches!(self.machine.phase, Phase::Listening | Phase::Transcribing | Phase::Thinking) || self.envelope.value > 0.01
     }
 
     // ----------------------------------------------------------------------------- drawing
@@ -428,7 +560,10 @@ impl Overlay {
         let dark = c.is_dark;
         let accent = rgb(c.accent_color().into());
         let t = self.now();
-        let phase_t = self.phase_since.elapsed().as_secs_f32();
+        let phase_t = match self.speaking_since {
+            Some(since) if self.machine.speaking => since.elapsed().as_secs_f32(),
+            _ => self.phase_since.elapsed().as_secs_f32(),
+        };
         let done = self.done_at.map(|d| aura::done_flash(d.elapsed().as_secs_f32())).unwrap_or(0.0);
         let error_t = self.error_at.map(|e| e.elapsed().as_secs_f32());
         let (tone, mode) = match &self.machine.phase {
@@ -437,6 +572,7 @@ impl Overlay {
             Phase::Thinking => (Tone::Accent, Mode::Thinking),
             Phase::Error(_) => (Tone::Error, Mode::Error),
             Phase::Done if done > 0.0 => (Tone::Done, Mode::Done),
+            _ if self.machine.speaking => (Tone::Accent, Mode::Speaking),
             _ => (Tone::Accent, Mode::Idle),
         };
         let (w, h) = self.size_now();
@@ -447,7 +583,8 @@ impl Overlay {
         let sizes = corners::sizes(&self.settings.corners);
         let radius = if corners::normalize(&self.settings.corners) == "square" { 0.0 } else { sizes.radius.clamp(12.0, 26.0) };
         let mut surface: Color = c.bg_color().into();
-        surface.a = 0.92;
+        // Nearly opaque: text behind the pill must not show through the answer.
+        surface.a = 0.985;
         AuraCanvas {
             pill: Rectangle::new(Point::new((SURFACE.0 - w) / 2.0 + shake, MARGIN), Size::new(w, h)),
             radius: radius.min(h / 2.0),
@@ -526,8 +663,11 @@ impl Overlay {
             _ => {}
         }
         if !m.answer.is_empty() && m.phase != Phase::Thinking {
-            for block in markdown::parse(&m.answer) {
+            for block in markdown::parse(&self.shown) {
                 col = col.push(block_view(block));
+            }
+            for (i, item) in self.turn.items.iter().enumerate() {
+                col = col.push(self.item_view(i, item));
             }
             any = true;
         }
@@ -545,7 +685,15 @@ impl Overlay {
 
     fn footer(&self) -> Element<'_, Message> {
         let left = self.status.clone().unwrap_or_else(|| self.helper_name.clone());
-        let hints = if self.machine.answer.is_empty() { tr("Enter sends · Ctrl+M talks · Esc closes") } else { tr("Enter asks · Ctrl+Shift+C copies · Esc closes") };
+        let hints = if self.machine.confirming {
+            tr("Enter runs · Esc cancels")
+        } else if self.machine.answer.is_empty() {
+            tr("Enter sends · Ctrl+M talks · Esc closes")
+        } else if self.turn.undoable().is_some() {
+            tr("Ctrl+Z undoes · Enter asks · Esc closes")
+        } else {
+            tr("Enter asks · Ctrl+Shift+C copies · Esc closes")
+        };
         row![
             text::caption(left).class(theme::Text::Custom(dim_text)),
             space::horizontal().width(Length::Fill),
@@ -553,6 +701,85 @@ impl Overlay {
         ]
         .padding([4, 16, 8, 16])
         .into()
+    }
+
+    /// One action: a chip, the amber card, the weather card, a command's output or app choices.
+    fn item_view(&self, i: usize, item: &actions::Item) -> Element<'_, Message> {
+        let what = item.action.as_ref().map(actions::describe).unwrap_or_else(|| tr("An action this overlay can't read"));
+        let chip = |mark: &'static str, label: String, tone: fn(&cosmic::Theme) -> iced_text::Style, undo: Option<usize>| -> Element<'_, Message> {
+            let mut r = row![text::body(mark).class(theme::Text::Custom(tone)).width(Length::Fixed(16.0)), text::body(label).width(Length::Fill)].spacing(4).align_y(cosmic::iced::Alignment::Center);
+            if let Some(i) = undo {
+                r = r.push(cosmic::widget::button::text(tr("Undo")).on_press(Message::Undo(Some(i))));
+            }
+            container(r).padding([4, 8]).width(Length::Fill).class(theme::Container::custom(chip_box)).into()
+        };
+        match &item.state {
+            ItemState::Waiting => chip("·", what, dim_text, None),
+            ItemState::Running => chip("…", what, dim_text, None),
+            ItemState::Done { text, undo } => chip("▸", text.clone(), accent_text, undo.as_ref().map(|_| i)),
+            ItemState::Undone(text) => chip("↶", trf("Undone: {0}", &[text]), dim_text, None),
+            ItemState::Failed(e) => chip("✕", format!("{what}: {e}"), error_text, None),
+            ItemState::Unsupported(e) => chip("!", format!("{what}: {e}"), warning_text, None),
+            ItemState::Blocked(why) => chip("⊘", format!("{} {what}. {}", tr("Blocked:"), tr(why)), error_text, None),
+            ItemState::Rejected(_) => chip("⊘", tr("The helper proposed an action this overlay can't read."), dim_text, None),
+            ItemState::Cancelled => chip("–", trf("Cancelled: {0}", &[&what]), dim_text, None),
+            ItemState::Confirm => self.card_view(item, what),
+            ItemState::Weather(w) => weather_view(w),
+            ItemState::Output { ok, text, output } => {
+                let mut c = cosmic::iced::widget::Column::new().spacing(4).push(row![
+                    text::body(if *ok { "▸" } else { "✕" }).class(theme::Text::Custom(if *ok { accent_text } else { error_text })).width(Length::Fixed(16.0)),
+                    text::body(text.clone())
+                ]);
+                if !output.is_empty() {
+                    let shown: String = output.chars().take(4000).collect();
+                    c = c.push(container(text::body(shown).font(cosmic::font::mono()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
+                }
+                c.into()
+            }
+            ItemState::Choices(list) => {
+                let mut r = row![].spacing(8).align_y(cosmic::iced::Alignment::Center);
+                for (n, app) in list.iter().enumerate() {
+                    r = r.push(cosmic::widget::button::standard(app.name.clone()).on_press(Message::Pick(i, n)));
+                }
+                column![text::caption(tr("Several apps fit. Which one?")).class(theme::Text::Custom(dim_text)), scrollable(r).direction(cosmic::iced::widget::scrollable::Direction::Horizontal(Default::default()))].spacing(4).into()
+            }
+        }
+    }
+
+    /// The amber confirmation card: what would run, [Esc] Cancel, [Enter] Run.
+    fn card_view(&self, item: &actions::Item, what: String) -> Element<'_, Message> {
+        let mut c = cosmic::iced::widget::Column::new().spacing(6).push(row![text::body("!").class(theme::Text::Custom(warning_text)).width(Length::Fixed(16.0)), text::heading(what)]);
+        match &item.action {
+            Some(schema::Action::RunCommand { argv, why }) => {
+                c = c.push(container(text::body(shell_words(argv)).font(cosmic::font::mono()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
+                if !why.is_empty() {
+                    c = c.push(text::caption(why.clone()).class(theme::Text::Custom(dim_text)));
+                }
+                c = c.push(text::caption(tr("Runs in your home folder without a shell, for at most 60 s.")).class(theme::Text::Custom(dim_text)));
+            }
+            Some(schema::Action::CloseWindow | schema::Action::MoveWindow { .. }) => {
+                let window = match &item.target.window {
+                    Some(w) if !w.title.is_empty() => format!("{} — {}", w.class, w.title),
+                    Some(w) => w.class.clone(),
+                    None => tr("the active window"),
+                };
+                c = c.push(text::caption(window).class(theme::Text::Custom(dim_text)));
+            }
+            _ if self.tainted || self.turn.read_outside() => {
+                c = c.push(text::caption(tr("This request read outside text, so it asks first.")).class(theme::Text::Custom(dim_text)));
+            }
+            _ => {}
+        }
+        c = c.push(
+            row![
+                space::horizontal().width(Length::Fill),
+                cosmic::widget::button::text(format!("Esc  {}", tr("Cancel"))).on_press(Message::CancelClicked),
+                cosmic::widget::button::suggested(format!("Enter  {}", tr("Run"))).on_press(Message::ConfirmClicked),
+            ]
+            .spacing(8)
+            .align_y(cosmic::iced::Alignment::Center),
+        );
+        container(c).padding(12).width(Length::Fill).class(theme::Container::custom(amber_card)).into()
     }
 
     fn pill(&self) -> Element<'_, Message> {
@@ -583,6 +810,67 @@ impl Overlay {
         let stack: Element<Message> = cosmic::iced::widget::stack![ring, placed].into();
         mouse_area(container(stack).width(Length::Fixed(SURFACE.0)).height(Length::Fixed(SURFACE.1))).into()
     }
+}
+
+/// An argv as one line people can read (quoted where needed; it is never given to a shell).
+pub fn shell_words(argv: &[String]) -> String {
+    argv.iter()
+        .map(|a| if !a.is_empty() && a.chars().all(|c| c.is_alphanumeric() || "-_./=:,@%+".contains(c)) { a.clone() } else { format!("'{}'", a.replace('\'', "'\\''")) })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The weather card: now, today's high and low, the next hours.
+fn weather_view(w: &actions::weather::Weather) -> Element<'static, Message> {
+    use actions::weather::{condition, degrees, icon};
+    let icon_of = |code: i64, day: bool, size: u16| cosmic::widget::icon::from_name(icon(code, day)).size(size).icon();
+    let mut details = vec![];
+    if let Some(f) = w.feels_like {
+        details.push(trf("Feels like {0}", &[&degrees(f)]));
+    }
+    if let Some(wind) = w.wind_kmh {
+        details.push(trf("Wind {0} km/h", &[&format!("{}", wind.round())]));
+    }
+    let mut today = vec![];
+    if let (Some(h), Some(l)) = (w.high, w.low) {
+        today.push(trf("High {0} · low {1}", &[&degrees(h), &degrees(l)]));
+    }
+    if let Some(r) = w.rain_chance {
+        today.push(trf("Rain {0} %", &[&r.to_string()]));
+    }
+    let place = if w.place.region.is_empty() { w.place.name.clone() } else { format!("{}, {}", w.place.name, w.place.region) };
+    let now = row![
+        icon_of(w.code, w.day, 40),
+        column![
+            text::title3(degrees(w.temperature)),
+            text::body(tr(condition(w.code))),
+        ]
+        .spacing(0),
+        space::horizontal().width(Length::Fill),
+        column![
+            text::heading(place).align_x(cosmic::iced::alignment::Horizontal::Right),
+            text::caption(details.join(" · ")).class(theme::Text::Custom(dim_text)),
+            text::caption(today.join(" · ")).class(theme::Text::Custom(dim_text)),
+        ]
+        .spacing(2)
+        .align_x(cosmic::iced::Alignment::End),
+    ]
+    .spacing(12)
+    .align_y(cosmic::iced::Alignment::Center);
+    let mut hours = row![].spacing(4);
+    for h in &w.hours {
+        hours = hours.push(
+            column![text::caption(h.time.clone()).class(theme::Text::Custom(dim_text)), icon_of(h.code, h.day, 20), text::caption(degrees(h.temperature))]
+                .spacing(2)
+                .align_x(cosmic::iced::Alignment::Center)
+                .width(Length::Fill),
+        );
+    }
+    let mut c = column![now].spacing(10);
+    if !w.hours.is_empty() {
+        c = c.push(cosmic::widget::divider::horizontal::light()).push(hours);
+    }
+    container(c).padding(12).width(Length::Fill).class(theme::Container::custom(weather_box)).into()
 }
 
 /// The last `max` characters (live speech scrolls left in the compact field).
@@ -618,6 +906,36 @@ fn partial_text(theme: &cosmic::Theme) -> iced_text::Style {
 
 fn error_text(theme: &cosmic::Theme) -> iced_text::Style {
     iced_text::Style { color: Some(theme.cosmic().destructive_color().into()), ..Default::default() }
+}
+
+fn accent_text(theme: &cosmic::Theme) -> iced_text::Style {
+    iced_text::Style { color: Some(theme.cosmic().accent_text_color().into()), ..Default::default() }
+}
+
+fn warning_text(theme: &cosmic::Theme) -> iced_text::Style {
+    iced_text::Style { color: Some(theme.cosmic().warning_color().into()), ..Default::default() }
+}
+
+fn chip_box(theme: &cosmic::Theme) -> iced_container::Style {
+    let mut bg = Color::from(theme.cosmic().on_bg_color());
+    bg.a = 0.06;
+    iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().control.into(), ..Default::default() }, ..Default::default() }
+}
+
+fn weather_box(theme: &cosmic::Theme) -> iced_container::Style {
+    let mut bg = Color::from(theme.cosmic().on_bg_color());
+    bg.a = 0.05;
+    let mut border = Color::from(theme.cosmic().on_bg_color());
+    border.a = 0.10;
+    iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().radius.into(), width: 1.0, color: border }, ..Default::default() }
+}
+
+/// Amber: the palette's warning colour (Maprisma Theme's yellow) as a tint and a border.
+fn amber_card(theme: &cosmic::Theme) -> iced_container::Style {
+    let warning = Color::from(theme.cosmic().warning_color());
+    let mut bg = warning;
+    bg.a = 0.12;
+    iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().radius.into(), width: 1.5, color: warning }, ..Default::default() }
 }
 
 fn key_badge(theme: &cosmic::Theme) -> iced_container::Style {
@@ -672,6 +990,8 @@ enum Mode {
     Thinking,
     Done,
     Error,
+    /// Reading the answer aloud: a gentle pulse (the service sends no level for speech).
+    Speaking,
 }
 
 struct AuraCanvas {
@@ -736,6 +1056,10 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
                 let fade = (self.error_t / 0.6).clamp(0.0, 1.0);
                 (2.0, 0.45 * (1.0 - fade) + 0.12, 0.0, 0.75 + 0.25 * (1.0 - fade))
             }
+            Mode::Speaking => {
+                let pulse = if self.reduced { 0.5 } else { aura::speak_pulse(self.phase_t) };
+                (1.8 + 0.8 * pulse, 0.18 + 0.30 * pulse, if self.reduced { 0.0 } else { self.t * 0.25 }, 0.8 + 0.2 * pulse)
+            }
         };
         let colors = if self.mode == Mode::Idle { self.accent } else { self.colors };
         // Soft bloom: rings growing outwards, fading.
@@ -773,6 +1097,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
                 let (radius, a) = match self.mode {
                     Mode::Listening => (4.0 + 3.0 * level, 1.0),
                     Mode::Transcribing | Mode::Thinking => (5.0, 0.9),
+                    Mode::Speaking => (4.5 + 1.5 * if self.reduced { 0.5 } else { aura::speak_pulse(self.phase_t) }, 1.0),
                     Mode::Done | Mode::Error => (5.0, 1.0),
                     Mode::Idle => (4.0, 0.55),
                 };
@@ -839,6 +1164,13 @@ impl cosmic::Application for Overlay {
             status_gen: 0,
             capturing: false,
             body_height: None,
+            shown: String::new(),
+            turn: Turn::default(),
+            turn_gen: 0,
+            tainted: false,
+            speak_gen: 0,
+            speak: None,
+            speaking_since: None,
         };
         let theme = corners::set_app_theme(&app.settings.corners);
         let open = if app.output_wanted.is_some() {
@@ -864,7 +1196,7 @@ impl cosmic::Application for Overlay {
                     std::future::pending::<()>().await;
                 })
             }),
-            cosmic::iced::event::listen_with(|event, _status, id| match event {
+            cosmic::iced::event::listen_with(|event, status, id| match event {
                 cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                     use cosmic::iced::keyboard::{Key, key::Named};
                     if shot::is_shot_key(&key, modifiers) {
@@ -874,6 +1206,9 @@ impl cosmic::Application for Overlay {
                         Key::Named(Named::Escape) => Some(Message::Escape),
                         Key::Character(c) if modifiers.control() && modifiers.shift() && c.eq_ignore_ascii_case("c") => Some(Message::CopyAnswer),
                         Key::Character(c) if modifiers.control() && !modifiers.shift() && c.eq_ignore_ascii_case("m") => Some(Message::ToggleMic),
+                        Key::Character(c) if modifiers.control() && !modifiers.shift() && c.eq_ignore_ascii_case("z") => Some(Message::Undo(None)),
+                        // Enter when the field doesn't have it (it would send Submit itself).
+                        Key::Named(Named::Enter) if status == cosmic::iced::event::Status::Ignored => Some(Message::Submit),
                         _ => None,
                     }
                 }
@@ -894,6 +1229,10 @@ impl cosmic::Application for Overlay {
             let key = (self.voice_gen, end);
             let session = if self.flags.demo { Subscription::run_with(key, voice::demo) } else { Subscription::run_with(key, voice::session) };
             subs.push(session.with(self.voice_gen).map(|(generation, event)| Message::Voice(generation, event)));
+        }
+        if let Some((text, language)) = &self.speak {
+            let key = (self.speak_gen, text.clone(), language.clone());
+            subs.push(Subscription::run_with(key, voice::speak).with(self.speak_gen).map(|(generation, event)| Message::Speak(generation, event)));
         }
         if self.animating() {
             subs.push(cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::Frame));
@@ -977,9 +1316,9 @@ impl cosmic::Application for Overlay {
             Message::ClickOutside => return self.handle(Event::ClickOutside),
             Message::ToggleMic => return self.handle(Event::ToggleMic),
             Message::CopyAnswer => {
-                if !self.machine.answer.is_empty() {
+                if !self.shown.is_empty() {
                     let status = self.set_status(tr("Copied"));
-                    return Task::batch([cosmic::iced::clipboard::write(self.machine.answer.clone()), status]);
+                    return Task::batch([cosmic::iced::clipboard::write(self.shown.clone()), status]);
                 }
             }
             Message::Answer(generation, result, name) => {
@@ -990,12 +1329,105 @@ impl cosmic::Application for Overlay {
                 if !name.is_empty() {
                     self.helper_name = name;
                 }
-                if let Ok(answer) = &result {
-                    let e = Exchange { question: self.machine.question.clone(), answer: answer.clone(), at: crate::last::now() };
-                    crate::last::save(&e);
-                    self.last = Some(e);
+                let answer = result.as_ref().ok().cloned();
+                let task = self.handle(Event::Answer(result));
+                let Some(answer) = answer else { return task };
+                let split = schema::split(&answer);
+                self.shown = split.text.clone();
+                self.turn_gen += 1;
+                self.turn = if self.settings.actions && !self.flags.demo {
+                    Turn::new(&self.machine.question, &split, self.tainted, self.settings.confirm_all, crate::last::now())
+                } else {
+                    Turn::default()
+                };
+                if self.settings.speak_answers && !self.flags.demo && !self.shown.is_empty() {
+                    self.speak_gen += 1;
+                    self.speak = Some((self.shown.clone(), voice::speak_language(&ui_language(&self.settings.language)).to_string()));
                 }
-                return self.handle(Event::Answer(result));
+                // Window actions aim at the window that is active now (looked up first).
+                let wants: Vec<Option<schema::Action>> = self.turn.items.iter().map(|i| i.action.clone()).collect();
+                let next = if wants.iter().flatten().any(|a| matches!(a, schema::Action::CloseWindow | schema::Action::MoveWindow { .. })) {
+                    let (desktop, generation) = (look::desktop(), self.turn_gen);
+                    blocking(move || wants.iter().map(|a| a.as_ref().map(|a| exec::prepare(a, desktop)).unwrap_or_default()).collect(), move |targets| Message::Prepared(generation, targets))
+                } else {
+                    self.pump()
+                };
+                return Task::batch([task, next]);
+            }
+            Message::Prepared(generation, targets) => {
+                if generation == self.turn_gen {
+                    for (item, target) in self.turn.items.iter_mut().zip(targets) {
+                        item.target = target;
+                    }
+                    return self.pump();
+                }
+            }
+            Message::ActionDone(generation, i, outcome) => {
+                if generation == self.turn_gen {
+                    self.turn.finished(i, outcome, crate::last::now());
+                    self.body_height = None;
+                    return self.pump();
+                }
+            }
+            Message::ConfirmClicked => {
+                if self.machine.confirming {
+                    return self.run(vec![Effect::Confirm]);
+                }
+            }
+            Message::CancelClicked => {
+                if self.machine.confirming {
+                    self.machine.confirming = false;
+                    return self.run(vec![Effect::CancelConfirm]);
+                }
+            }
+            Message::Undo(which) => {
+                let i = match which {
+                    Some(i) => Some(i),
+                    None => self.turn.undoable().map(|(i, _)| i),
+                };
+                if let Some(i) = i {
+                    if let Some(u) = self.turn.start_undo(i) {
+                        let (ctx, generation) = (self.context(), self.turn_gen);
+                        return blocking(move || exec::undo(&u, &ctx), move |result| Message::UndoDone(generation, i, result));
+                    }
+                }
+            }
+            Message::UndoDone(generation, i, result) => {
+                if generation == self.turn_gen {
+                    self.turn.undone(i, result, crate::last::now());
+                    return self.pump();
+                }
+            }
+            Message::Pick(i, choice) => {
+                if let Some(app) = self.turn.pick(i, choice) {
+                    let generation = self.turn_gen;
+                    return blocking(move || exec::launch(&app), move |outcome| Message::ActionDone(generation, i, outcome));
+                }
+            }
+            Message::Speak(generation, event) => {
+                if generation != self.speak_gen || self.speak.is_none() {
+                    return Task::none();
+                }
+                match event {
+                    SpeakEvent::Speaking => {
+                        self.speaking_since = Some(Instant::now());
+                        return self.handle(Event::Speaking(true));
+                    }
+                    SpeakEvent::Ended(state, message) => {
+                        self.speak = None;
+                        self.speaking_since = None;
+                        let task = self.handle(Event::Speaking(false));
+                        if state == "error" && !message.is_empty() {
+                            return Task::batch([task, self.set_status(message)]);
+                        }
+                        return task;
+                    }
+                    SpeakEvent::Failed(message) => {
+                        self.speak = None;
+                        let task = self.handle(Event::Speaking(false));
+                        return Task::batch([task, self.set_status(message)]);
+                    }
+                }
             }
             Message::Frame => {
                 let now = Instant::now();

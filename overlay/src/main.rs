@@ -4,16 +4,18 @@
 //   maprisma-dictation --hold       open for hold-to-talk (bind on key press) …
 //   maprisma-dictation --release    … and this on key release: stop listening and ask
 //   maprisma-dictation --demo       made-up voice levels, speech and answer (no mic, no helper)
+//   maprisma-dictation --ask TEXT   open and ask TEXT at once, as if typed
 
 use maprisma_dictation::{instance, ui};
 
-const USAGE: &str = "Usage: maprisma-dictation [--toggle] [--hold] [--release] [--demo]
+const USAGE: &str = "Usage: maprisma-dictation [--toggle] [--hold] [--release] [--demo] [--ask TEXT]
 
   --toggle    open the overlay and listen (the default); if it is open, close it
   --hold      hold-to-talk: listen until --release (a tap shorter than 250 ms keeps
               listening until you stop talking)
   --release   the talk key went up (bind it to the key's release)
   --demo      simulate a voice session and an answer (for trying the look)
+  --ask TEXT  open without listening and ask TEXT at once (as if typed)
 
 Bind it to a key: see docs/overlay.md (COSMIC, KDE Plasma, Hyprland).";
 
@@ -21,8 +23,16 @@ fn main() -> cosmic::iced::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut flags = ui::Flags::default();
     let mut release = false;
-    for arg in &args {
+    let mut args_iter = args.iter();
+    while let Some(arg) = args_iter.next() {
         match arg.as_str() {
+            "--ask" => match args_iter.next() {
+                Some(question) if !question.trim().is_empty() => flags.ask = Some(question.clone()),
+                _ => {
+                    eprintln!("maprisma-dictation: --ask needs a question\n\n{USAGE}");
+                    std::process::exit(2);
+                }
+            },
             "--toggle" => {}
             "--hold" => flags.hold = true,
             "--release" => release = true,

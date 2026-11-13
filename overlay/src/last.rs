@@ -18,7 +18,7 @@ pub fn save_in(dir: &Path, e: &Exchange) -> std::io::Result<()> {
     let tmp = dir.join(format!(".{FILE}.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-    f.write_all(json!({"question": e.question, "answer": e.answer, "at": e.at}).to_string().as_bytes())?;
+    f.write_all(json!({"question": e.question, "answer": e.answer, "tainted": e.tainted, "at": e.at}).to_string().as_bytes())?;
     drop(f);
     std::fs::rename(&tmp, dir.join(FILE))
 }
@@ -33,7 +33,7 @@ pub fn load_in(dir: &Path, now: u64) -> Option<Exchange> {
     let mut text = String::new();
     std::fs::File::open(&path).ok()?.take(FILE_MAX).read_to_string(&mut text).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
-    let e = Exchange { question: v["question"].as_str()?.into(), answer: v["answer"].as_str()?.into(), at: v["at"].as_u64()? };
+    let e = Exchange { question: v["question"].as_str()?.into(), answer: v["answer"].as_str()?.into(), tainted: v["tainted"].as_bool().unwrap_or(false), at: v["at"].as_u64()? };
     let fresh = follow_up(Some(&e), now).is_some();
     if !fresh && now > e.at + FOLLOW_UP_SECS {
         let _ = std::fs::remove_file(&path);
@@ -61,7 +61,7 @@ mod tests {
         let dir = crate::paths::runtime_dir().unwrap();
         assert!(dir.starts_with(crate::paths::test_roots()));
         assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
-        let e = Exchange { question: "q".into(), answer: "a\n\"b\"".into(), at: 5000 };
+        let e = Exchange { question: "q".into(), answer: "a\n\"b\"".into(), tainted: true, at: 5000 };
         save_in(&dir, &e).unwrap();
         assert_eq!(std::fs::metadata(dir.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(load_in(&dir, 5040), Some(e.clone()));

@@ -54,6 +54,8 @@ pub enum Event {
     Released { held_ms: u64 },
     /// Ctrl+M: listen again, or stop listening.
     ToggleMic,
+    /// The voice service started (true) or stopped (false) reading the answer aloud.
+    Speaking(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,11 @@ pub enum Effect {
     /// Error: shake and turn red.
     FlashError,
     Close,
+    /// Enter on the amber card: run the action that waits.
+    Confirm,
+    /// Esc on the card, or a new question: the waiting action doesn't run.
+    CancelConfirm,
+    StopSpeaking,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,22 +94,41 @@ pub struct Machine {
     pub voice: Option<End>,
     /// The talk key went up (the session is finishing).
     pub released: bool,
+    /// An action waits for Enter on the amber card (ui.rs keeps this in step).
+    pub confirming: bool,
+    /// The answer is being read aloud.
+    pub speaking: bool,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { phase: Phase::Idle, text: String::new(), partial: String::new(), question: String::new(), answer: String::new(), note: None, voice: None, released: false }
+        Machine { phase: Phase::Idle, text: String::new(), partial: String::new(), question: String::new(), answer: String::new(), note: None, voice: None, released: false, confirming: false, speaking: false }
     }
 }
 
 impl Machine {
+    fn stop_speaking(&mut self) -> Vec<Effect> {
+        if std::mem::take(&mut self.speaking) { vec![Effect::StopSpeaking] } else { vec![] }
+    }
+
+    /// A new question or session: the waiting card goes (a spoken "yes" never confirms).
+    fn drop_card(&mut self) -> Vec<Effect> {
+        let mut effects = self.stop_speaking();
+        if std::mem::take(&mut self.confirming) {
+            effects.push(Effect::CancelConfirm);
+        }
+        effects
+    }
+
     fn start_voice(&mut self, end: End) -> Vec<Effect> {
+        let mut effects = self.stop_speaking();
+        effects.push(Effect::StartVoice(end));
         self.phase = Phase::Listening;
         self.voice = Some(end);
         self.partial.clear();
         self.note = None;
         self.released = false;
-        vec![Effect::StartVoice(end)]
+        effects
     }
 
     fn stop_voice(&mut self) -> Vec<Effect> {
@@ -111,17 +137,22 @@ impl Machine {
     }
 
     fn ask(&mut self, question: String) -> Vec<Effect> {
+        let mut effects = self.drop_card();
         self.question = question.clone();
         self.answer.clear();
         self.text.clear();
         self.partial.clear();
         self.note = None;
         self.phase = Phase::Thinking;
-        vec![Effect::Ask(question)]
+        effects.push(Effect::Ask(question));
+        effects
     }
 
     /// Clicking outside closes only while nothing would be lost.
     pub fn click_closes(&self) -> bool {
+        if self.confirming {
+            return false;
+        }
         match self.phase {
             Phase::Done | Phase::Error(_) => self.text.trim().is_empty(),
             Phase::Idle => self.text.trim().is_empty(),
@@ -199,6 +230,11 @@ impl Machine {
             }
             Event::Submit => {
                 let question = self.text.trim().to_string();
+                if question.is_empty() && self.confirming && self.phase != Phase::Thinking {
+                    // Enter on the card (only a key press gets here, never speech).
+                    self.confirming = false;
+                    return vec![Effect::Confirm];
+                }
                 if question.is_empty() || self.phase == Phase::Thinking {
                     return vec![];
                 }
@@ -222,7 +258,12 @@ impl Machine {
                     }
                 }
             }
-            // Staged: stop the voice or the helper first; the next Esc closes.
+            Event::Speaking(on) => {
+                self.speaking = on;
+                vec![]
+            }
+            // Staged: stop the voice, the helper, the speech or the card first; the next Esc closes.
+            Event::Escape if (self.speaking || self.confirming) && !matches!(self.phase, Phase::Listening | Phase::Transcribing | Phase::Thinking) => self.drop_card(),
             Event::Escape => match self.phase {
                 Phase::Listening | Phase::Transcribing => {
                     let effects = self.stop_voice();
@@ -413,5 +454,55 @@ mod tests {
         assert_eq!(m.phase, Phase::Transcribing);
         m.handle(Event::VoiceFinal("q".into()));
         assert_eq!(m.handle(Event::ToggleMic), vec![], "not while thinking");
+    }
+
+    fn answered() -> Machine {
+        let mut m = opened();
+        m.handle(Event::VoiceFinal("open firefox".into()));
+        m.handle(Event::Answer(Ok("Opening.".into())));
+        m
+    }
+
+    #[test]
+    fn the_confirmation_card() {
+        let mut m = answered();
+        m.confirming = true;
+        assert!(!m.click_closes(), "a waiting card is not lost by a click");
+        // Enter with an empty field runs it.
+        assert_eq!(m.handle(Event::Submit), vec![Effect::Confirm]);
+        assert!(!m.confirming);
+        // Esc cancels the card first; the next Esc closes.
+        m.confirming = true;
+        assert_eq!(m.handle(Event::Escape), vec![Effect::CancelConfirm]);
+        assert_eq!(m.handle(Event::Escape), vec![Effect::Close]);
+        // A typed question instead: the card goes, the question is asked.
+        let mut m = answered();
+        m.confirming = true;
+        m.handle(Event::Typed("no, open chrome".into()));
+        assert_eq!(m.handle(Event::Submit), vec![Effect::CancelConfirm, Effect::Ask("no, open chrome".into())]);
+        // Speech never confirms: a spoken "yes" is a new question and the card goes.
+        let mut m = answered();
+        m.confirming = true;
+        m.handle(Event::ToggleMic);
+        assert_eq!(m.handle(Event::VoiceFinal("yes".into())), vec![Effect::CancelConfirm, Effect::Ask("yes".into())]);
+        assert!(!m.confirming);
+    }
+
+    #[test]
+    fn speaking_answers() {
+        let mut m = answered();
+        m.handle(Event::Speaking(true));
+        // Esc stops the voice first, then closes.
+        assert_eq!(m.handle(Event::Escape), vec![Effect::StopSpeaking]);
+        assert_eq!(m.handle(Event::Escape), vec![Effect::Close]);
+        // A new voice session stops it too.
+        let mut m = answered();
+        m.handle(Event::Speaking(true));
+        assert_eq!(m.handle(Event::ToggleMic), vec![Effect::StopSpeaking, Effect::StartVoice(End::Silence)]);
+        // Done speaking: Esc closes at once.
+        let mut m = answered();
+        m.handle(Event::Speaking(true));
+        m.handle(Event::Speaking(false));
+        assert_eq!(m.handle(Event::Escape), vec![Effect::Close]);
     }
 }

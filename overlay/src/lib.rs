@@ -28,12 +28,26 @@ mod tests {
         let re = regex::Regex::new(r#"\btrf?\("([^"]+)""#).unwrap();
         let note = regex::Regex::new(r#"note = Some\("([^"]+)""#).unwrap();
         let mut seen = 0;
-        for file in ["src/ui.rs", "src/helper.rs", "src/voice.rs", "src/state.rs"] {
+        // Keys chosen at run time: `trf(if light { "…" } else { "…" }`, the block-list reasons, the weather words.
+        let either = regex::Regex::new(r#"trf\(if \w+ \{ "([^"]+)" \} else \{ "([^"]+)" \}"#).unwrap();
+        let why = regex::Regex::new(r#"pub const WHY_\w+: &str = "([^"]+)""#).unwrap();
+        let mut keys = vec![];
+        for file in ["src/ui.rs", "src/helper.rs", "src/voice.rs", "src/state.rs", "src/actions/mod.rs", "src/actions/exec.rs", "src/actions/policy.rs"] {
             let text = std::fs::read_to_string(file).unwrap();
-            for cap in re.captures_iter(&text).chain(note.captures_iter(&text)) {
-                assert!(en.contains_key(&cap[1]), "{file}: {}", &cap[1]);
-                seen += 1;
+            for cap in re.captures_iter(&text).chain(note.captures_iter(&text)).chain(why.captures_iter(&text)) {
+                keys.push((file, cap[1].to_string()));
             }
+            for cap in either.captures_iter(&text) {
+                keys.push((file, cap[1].to_string()));
+                keys.push((file, cap[2].to_string()));
+            }
+        }
+        for code in [0, 1, 2, 3, 45, 51, 56, 61, 71, 80, 85, 95, -1] {
+            keys.push(("src/actions/weather.rs", crate::actions::weather::condition(code).to_string()));
+        }
+        for (file, key) in keys {
+            assert!(en.contains_key(&key), "{file}: {key}");
+            seen += 1;
         }
         assert!(seen > 20, "{seen}");
         for (i, (code, _)) in maprisma_voice::i18n::LANGUAGES.iter().enumerate().skip(1) {

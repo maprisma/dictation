@@ -203,9 +203,25 @@ pub fn breath(t: f32) -> f32 {
     0.5 - 0.5 * (2.0 * PI * 0.2 * t).cos()
 }
 
+/// Speaking: a gentle pulse, 0…1, about one swell per 1.1 s (a speaking pace without a level).
+pub fn speak_pulse(t: f32) -> f32 {
+    let slow = 0.5 - 0.5 * (2.0 * PI * t / 1.1).cos();
+    let fine = 0.5 - 0.5 * (2.0 * PI * t / 0.37).cos();
+    (0.8 * slow + 0.2 * fine).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaking_pulse_is_gentle() {
+        let v: Vec<f32> = (0..200).map(|i| speak_pulse(i as f32 * 0.01)).collect();
+        assert!(v.iter().all(|x| (0.0..=1.0).contains(x)));
+        assert!(v[0] < 0.01 && v.iter().cloned().fold(0.0, f32::max) > 0.8);
+        // no jumps between 60 Hz frames
+        assert!((1..200).all(|i| (speak_pulse(i as f32 / 60.0) - speak_pulse((i - 1) as f32 / 60.0)).abs() < 0.08));
+    }
 
     fn hex(v: u32) -> Rgb {
         [((v >> 16) & 255) as f32 / 255.0, ((v >> 8) & 255) as f32 / 255.0, (v & 255) as f32 / 255.0]

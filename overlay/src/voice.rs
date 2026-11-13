@@ -128,6 +128,80 @@ pub fn session(key: &(u64, End)) -> impl Stream<Item = VoiceEvent> + use<> {
     })
 }
 
+/// Reading an answer aloud (maprisma-voice `Speak`, docs/protocol.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpeakEvent {
+    Speaking,
+    /// done, stopped or error (with its message).
+    Ended(String, String),
+    /// Speak was refused (no Kokoro, listening, service missing…).
+    Failed(String),
+}
+
+/// The language option for `Speak`: German and English voices only, else `auto`.
+pub fn speak_language(code: &str) -> &'static str {
+    match code {
+        "de" => "de",
+        "en" => "en",
+        _ => "auto",
+    }
+}
+
+/// `(generation, text, language)`: one `Speak` call and its `Speaking` signals.
+pub fn speak(key: &(u64, String, String)) -> impl Stream<Item = SpeakEvent> + use<> {
+    let (text, language) = (key.1.clone(), key.2.clone());
+    cosmic::iced::stream::channel(16, async move |mut out: cosmic::iced::futures::channel::mpsc::Sender<SpeakEvent>| {
+        use futures_util::SinkExt;
+        let connection = match zbus::Connection::session().await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = out.send(SpeakEvent::Failed(e.to_string())).await;
+                return;
+            }
+        };
+        let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(INTERFACE).unwrap().member("Speaking").unwrap().path(PATH).unwrap().build();
+        let Ok(mut signals) = zbus::MessageStream::for_match_rule(rule, &connection, Some(64)).await else {
+            let _ = out.send(SpeakEvent::Failed(tr("The voice service is not running."))).await;
+            return;
+        };
+        let mut options: HashMap<&str, Value<'_>> = HashMap::new();
+        options.insert("language", language.as_str().into());
+        let reply = connection.call_method(Some(NAME), PATH, Some(INTERFACE), "Speak", &(text.as_str(), options)).await;
+        let id: String = match reply.and_then(|r| r.body().deserialize::<String>()) {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = out.send(SpeakEvent::Failed(method_error(&e))).await;
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        while let Some(Ok(message)) = signals.next().await {
+            let Ok((sid, state, msg)) = message.body().deserialize::<(String, String, String)>() else { continue };
+            if sid != id {
+                continue;
+            }
+            match state.as_str() {
+                "speaking" => {
+                    let _ = out.send(SpeakEvent::Speaking).await;
+                }
+                "done" | "stopped" | "error" => {
+                    let _ = out.send(SpeakEvent::Ended(state, msg)).await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        std::future::pending::<()>().await;
+    })
+}
+
+/// `StopSpeaking` (quietly: a missing service has nothing to stop).
+pub async fn stop_speaking() {
+    if let Ok(connection) = zbus::Connection::session().await {
+        let _ = tokio::time::timeout(Duration::from_secs(2), connection.call_method(Some(NAME), PATH, Some(INTERFACE), "StopSpeaking", &())).await;
+    }
+}
+
 /// The demo's question and answer (`--demo`).
 pub const DEMO_QUESTION: &str = "What is the difference between a process and a thread?";
 pub const DEMO_ANSWER: &str = "A **process** is a running program with its own memory; a **thread** is a path of execution inside a process.\n\n- Threads of one process share its memory and open files, so they talk cheaply but must lock shared data.\n- Processes are isolated: one crashing does not take the others down.\n\nOn Linux both are tasks; you can see the threads of a process with:\n\n```\nps -T -p <pid>\n```";

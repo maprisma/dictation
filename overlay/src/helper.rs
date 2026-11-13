@@ -216,6 +216,8 @@ pub fn ask_argv(chosen: &Chosen, prompt: &str) -> Vec<String> {
 pub struct Exchange {
     pub question: String,
     pub answer: String,
+    /// The answer read outside text (a weather result): actions in a follow-up need Enter.
+    pub tainted: bool,
     /// When the answer came (seconds since the epoch).
     pub at: u64,
 }
@@ -245,17 +247,44 @@ fn cut(text: &str, max: usize) -> String {
     if text.chars().count() <= max { text.to_string() } else { format!("{}…", text.chars().take(max).collect::<String>()) }
 }
 
-/// The question with a short preamble: who the helper is here, the language, what it can't do
-/// yet (step 4: answers only), and the last exchange when this is a follow-up.
-pub fn build_prompt(question: &str, context: Option<&Exchange>, language: &str, desktop: &str) -> String {
+/// What the helper may propose, and how (docs/overlay.md "Actions"; actions/schema.rs checks it).
+pub const ACTIONS_PREAMBLE: &str = "You have no shell and no tools, but the overlay can carry out a few desktop actions for you. \
+To propose them, end your answer with ONE fenced code block whose info string is maprisma-actions, holding a JSON array \
+(at most 6 objects) of only these objects:\n\
+{\"kind\": \"open_app\", \"name\": \"<the app's name as the user said it>\"}\n\
+{\"kind\": \"open_url\", \"url\": \"https://...\"}\n\
+{\"kind\": \"dnd\", \"on\": true}   (do not disturb on or off)\n\
+{\"kind\": \"theme_mode\", \"mode\": \"light\"}   (light or dark)\n\
+{\"kind\": \"volume\", \"percent\": 40}   or \"change\": -10 (-100..100) instead of percent; and/or \"mute\": true\n\
+{\"kind\": \"media\", \"command\": \"play_pause\"}   (play_pause, next or previous)\n\
+{\"kind\": \"workspace\", \"number\": 2}\n\
+{\"kind\": \"move_window\", \"workspace\": 2}   (moves the active window)\n\
+{\"kind\": \"close_window\"}   (closes the active window; the user confirms)\n\
+{\"kind\": \"weather\", \"location\": \"Berlin\"}   (\"\" for the user's own place; the overlay fetches the forecast and shows it as a card)\n\
+{\"kind\": \"run_command\", \"argv\": [\"program\", \"arg\"], \"why\": \"<short reason>\"}   (no shell; runs in the home folder only after the user presses Enter; \
+only for what the kinds above can't do; sudo, packages, deleting files, autostart and secrets are always refused)\n\
+Use no other kinds or fields. Propose actions only when the user asks for something to be done or for the weather; otherwise just answer. \
+Keep the text short and say what is about to happen (\"Opening Firefox.\"), never claim a result you cannot know, and never make up weather numbers: \
+the card shows them. If no action fits, say how the user can do it.";
+
+/// The question with a short preamble: who the helper is here, the language, what it may do
+/// (the actions block, or answers only), and the last exchange when this is a follow-up.
+pub fn build_prompt(question: &str, context: Option<&Exchange>, language: &str, desktop: &str, actions: bool) -> String {
     let mut p = format!(
         "You are the voice and typing assistant of a Linux desktop ({desktop}; Maprisma runs on COSMIC, KDE Plasma and Hyprland). \
          The user spoke or typed the request below into a small overlay. Answer briefly and plainly: a few sentences, or a short list \
-         or code block when that helps. Answer in the user's language (the language of the request; if unclear, {}). \
-         You cannot act on the desktop yet: do not run commands, open apps or change files. If the user asks for an action, \
-         say in one or two sentences how to do it, without claiming it was done.\n\n",
+         or code block when that helps. Answer in the user's language (the language of the request; if unclear, {}). ",
         language_name(language)
     );
+    if actions {
+        p.push_str(ACTIONS_PREAMBLE);
+    } else {
+        p.push_str(
+            "You cannot act on the desktop: do not run commands, open apps or change files. If the user asks for an action, \
+             say in one or two sentences how to do it, without claiming it was done.",
+        );
+    }
+    p.push_str("\n\n");
     if let Some(e) = context {
         p.push_str("The previous exchange (this is a follow-up):\n");
         p.push_str(&format!("User: {}\nAssistant: {}\n\n", cut(&e.question, 2000), cut(&e.answer, 4000)));
@@ -502,14 +531,22 @@ mod tests {
 
     #[test]
     fn prompt_and_follow_ups() {
-        let p = build_prompt("Wie spät ist es?", None, "de", "KDE");
+        let p = build_prompt("Wie spät ist es?", None, "de", "KDE", false);
         assert!(p.contains("German") && p.contains("cannot act") && p.contains("KDE") && p.ends_with("User: Wie spät ist es?"));
-        let last = Exchange { question: "q1".into(), answer: "a1".into(), at: 1000 };
+        let p = build_prompt("open firefox", None, "en", "Hyprland", true);
+        assert!(p.contains("maprisma-actions") && p.contains("\"kind\": \"run_command\"") && !p.contains("cannot act"));
+        // every kind the preamble names parses
+        for line in ACTIONS_PREAMBLE.lines().filter(|l| l.starts_with('{')) {
+            let json = &line[..line.rfind('}').unwrap() + 1];
+            let v: serde_json::Value = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            crate::actions::schema::parse_one(&v).unwrap_or_else(|e| panic!("{json}: {e}"));
+        }
+        let last = Exchange { question: "q1".into(), answer: "a1".into(), tainted: false, at: 1000 };
         assert_eq!(follow_up(Some(&last), 1045), Some(&last));
         assert_eq!(follow_up(Some(&last), 1046), None);
         assert_eq!(follow_up(Some(&last), 999), None, "clock went back");
         assert_eq!(follow_up(None, 1000), None);
-        let p = build_prompt("and tomorrow?", Some(&last), "en", "Hyprland");
+        let p = build_prompt("and tomorrow?", Some(&last), "en", "Hyprland", true);
         assert!(p.contains("User: q1\nAssistant: a1") && p.ends_with("User: and tomorrow?"));
     }
 
