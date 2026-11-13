@@ -3,7 +3,7 @@
 **Decided (Uwe, 2026-11-13):**
 - the aura ring as the animation;
 - the overlay at the top centre;
-- one voice service for STT and TTS, so the Narrator becomes a client and needs the Manager;
+- one voice service; the Narrator is **not** merged into it (see Narrator);
 - typed tools with Enter to confirm.
 
 Goal: **one shared voice service for all Maprisma apps**, plus a **voice/typing overlay** in which you ask an
@@ -96,18 +96,17 @@ The AI helper is the shared one from Manager → AI. It gets **typed tools** ins
 Once a request has read outside text (web, screen text), every later action needs at least level 1. Every
 action is logged, and the log is visible in the Manager.
 
-## Narrator
+## Narrator: stays on its own (decided 2026-11-13)
 
-The Narrator's Kokoro voice moves into the service as `Speak()`. The overlay speaks its answers in it, if that
-is turned on.
+On checking, the Narrator is **not** merged, because its speech is built into how it reads:
+- four voice providers: Kokoro, Piper, Qwen3-TTS and online;
+- NLLB translation and audio routing;
+- highlighting that follows each spoken passage;
+- a runtime (`kindle-reader`, `ocrvox.service`) shared with the Omarchy plugin.
 
-The Narrator becomes a client of the service:
-- It reads books through `Speak`.
-- It gets voice commands such as "next page", "stop" and "read on".
-- Its voice settings move to the Manager's category. Without the Manager installed, the Narrator does not work.
+Moving that would mean rebuilding it and risking a working app. The Narrator reads and does not dictate, so it gains nothing from the service.
 
-The reader runtime keeps its Omarchy names (`kindle-reader`, `ocrvox.service`), so the Omarchy plugin stays
-intact.
+What remains: the overlay may read short answers aloud. For that, `Speak` uses an installed Kokoro (its model files, read-only) if one is present. The Narrator stays unchanged and independent of the Manager.
 
 ## Manager: new "Voice" category
 
@@ -116,7 +115,7 @@ intact.
   (hold/toggle); the animation.
 - **Assistant:** on/off; key; speak answers; history and private mode; action levels (which level-1 actions
   are allowed without asking); the action log.
-- **Speech (from the Narrator):** voice, speed and language.
+- **Speech:** read answers aloud (Kokoro, if installed): voice and speed.
 - **Omarchy:** "Use Maprisma Dictation for Omarchy's dictation keys". This installs the adapter and sets the
   backend through `omarchy-dictation-use`, never by editing Omarchy's files.
 
@@ -131,10 +130,7 @@ intact.
    where a text field exists.
 4. **The overlay:** layer-shell, animation, typing and talking, the shared AI helper, plain answers first.
 5. **`maprisma-actions`:** the typed tools, confirmation and log.
-6. **TTS:**
-   - Kokoro moves into the service.
-   - The overlay speaks its answers.
-   - The Narrator becomes a client: voice commands, settings in the Manager.
+6. **Speaking answers:** the overlay reads its answers aloud with an installed Kokoro (optional). The Narrator stays as it is.
 7. **Omarchy adapter;** optionally later a wake word (openWakeWord, off by default).
 
 Each step on its own branch, with tests, installed and pushed only when you say so.
