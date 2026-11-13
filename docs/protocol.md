@@ -80,3 +80,22 @@ The CLI writes them with `maprisma-voice set KEY VALUE` and `unset KEY`, which c
   - The key comes from `OPENAI_API_KEY` or `GROQ_API_KEY`, or from `~/.codex/.env`.
   - It is passed to curl on stdin, never on the command line.
 - **external:** `voxtype record start|stop`, `superwhisper start|stop` or `omarchy-dictation start|stop`. These type the text into the focused window themselves, so `Final` has `typed=true` and empty text.
+
+## For apps: `maprisma-voice dictate --events`
+Apps that would rather not speak D-Bus themselves (Flutter, QML) run the CLI. Every Maprisma mic button uses this.
+
+```
+maprisma-voice dictate --events [--release] [--app-id com.maprisma.Launcher] [--language de]
+```
+
+- **stdout:** one JSON object per line, flushed straight away:
+  - `{"event":"started","session":"…"}`
+  - `{"event":"state","state":"listening|transcribing|done|cancelled|error"}`
+  - `{"event":"level","rms":0.12}` (about 20 a second)
+  - `{"event":"partial","text":"…"}`
+  - `{"event":"final","text":"…","typed":false,"engine":"whisper"}`
+  - `{"event":"error","code":"…","message":"…"}`
+  - `{"event":"closed","reason":"finished|silence|no_speech|cancelled|preempted|…"}`, which comes last.
+- **stdin:** the line `finish` (or an empty line) stops listening and transcribes; `cancel` cancels. **Keep stdin open while listening:** when it closes, the session is cancelled, so a crashed app never leaves the microphone on.
+- **Ending:** without `--release` the session ends on silence. With `--release` it ends on `finish`, for a second click or a released key.
+- **Exit codes:** 0 done, 1 failed or cancelled, 3 no speech, 4 the service is missing (also an `error` event with `code: "start"`).

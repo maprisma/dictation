@@ -10,6 +10,8 @@ const USAGE: &str = "maprisma-voice — the Maprisma voice service
   maprisma-voice daemon                       run the D-Bus service com.maprisma.Voice1
   maprisma-voice dictate [--silence | --seconds N] [--language CODE] [--assistant]
                                               speak; partial text on stderr, the final text on stdout
+  maprisma-voice dictate --events [--release] [--app-id ID] …
+                                              for apps: JSON lines on stdout; stdin `finish`/`cancel`
   maprisma-voice transcribe FILE.wav [--engine E] [--model M] [--language CODE]
                                               a 16-bit PCM WAV file to text, without the daemon
   maprisma-voice status [--json]              engine, model, language and why it is not ready
@@ -101,12 +103,20 @@ fn dictate(args: &[String]) -> i32 {
         }
         None => None,
     };
+    let events = args.iter().any(|a| a == "--events");
+    let app_id = value_of(args, "--app-id").unwrap_or("com.maprisma.Voice.cli");
+    if app_id.is_empty() || app_id.len() > 128 || app_id.chars().any(|c| c.is_control()) {
+        eprintln!("--app-id: a short name");
+        return 2;
+    }
     let options = DictateOptions {
-        silence: args.iter().any(|a| a == "--silence") || seconds.is_none(),
+        // Apps finish on key release or a second click (`--release`); otherwise on silence.
+        silence: !args.iter().any(|a| a == "--release") && (args.iter().any(|a| a == "--silence") || seconds.is_none()),
         seconds,
         language: value_of(args, "--language").map(str::to_string),
         mode: if args.iter().any(|a| a == "--assistant") { "assistant".into() } else { "dictate".into() },
-        app_id: "com.maprisma.Voice.cli".into(),
+        app_id: app_id.into(),
+        events,
     };
     runtime(client::dictate(options))
 }

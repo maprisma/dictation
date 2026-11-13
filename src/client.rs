@@ -13,6 +13,17 @@ pub struct DictateOptions {
     pub language: Option<String>,
     pub mode: String,
     pub app_id: String,
+    /// JSON lines on stdout for apps (see docs/protocol.md, "dictate --events"); stdin takes
+    /// `finish` / `cancel` lines, and its end cancels.
+    pub events: bool,
+}
+
+/// One JSON event line on stdout (flushed: apps read it live).
+fn event(value: serde_json::Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{value}");
+    let _ = out.flush();
 }
 
 /// One decoded signal of our interface.
@@ -88,10 +99,15 @@ pub async fn dictate(options: DictateOptions) -> i32 {
         Ok(id) => id,
         Err(e) => {
             eprintln!("{}", trf("Could not start: {0}", &[&dbus_message(&e)]));
+            if options.events {
+                event(serde_json::json!({"event": "error", "code": "start", "message": dbus_message(&e)}));
+            }
             return if matches!(e, zbus::Error::MethodError(ref n, ..) if n.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown") { 4 } else { 1 };
         }
     };
-    if options.silence {
+    if options.events {
+        event(serde_json::json!({"event": "started", "session": id}));
+    } else if options.silence {
         eprintln!("{}", tr("Listening… stop talking to finish."));
     } else if let Some(s) = options.seconds {
         eprintln!("{}", trf("Listening for {0} s…", &[&format!("{s}")]));
@@ -114,7 +130,7 @@ pub async fn dictate(options: DictateOptions) -> i32 {
         }
     };
     let mut stdin = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(tokio::io::stdin()));
-    let read_stdin = !options.silence && options.seconds.is_none();
+    let read_stdin = options.events || (!options.silence && options.seconds.is_none());
     let mut stdin_open = read_stdin;
     let call = |method: &'static str| {
         let (connection, id) = (connection.clone(), id.clone());
@@ -132,8 +148,19 @@ pub async fn dictate(options: DictateOptions) -> i32 {
                 if session_of(&signal) != Some(id.as_str()) {
                     continue;
                 }
+                if options.events {
+                    match &signal {
+                        Signal::Partial(_, text) => event(serde_json::json!({"event": "partial", "text": text})),
+                        Signal::Level(_, rms) => event(serde_json::json!({"event": "level", "rms": rms})),
+                        Signal::State(_, state) => event(serde_json::json!({"event": "state", "state": state})),
+                        Signal::Final(_, text, typed, engine) => event(serde_json::json!({"event": "final", "text": text, "typed": typed, "engine": engine})),
+                        Signal::Error(_, code, message) => event(serde_json::json!({"event": "error", "code": code, "message": message})),
+                        Signal::Closed(_, reason) => event(serde_json::json!({"event": "closed", "reason": reason})),
+                        Signal::Other => {}
+                    }
+                }
                 match signal {
-                    Signal::Partial(_, text) => eprintln!("… {text}"),
+                    Signal::Partial(_, text) => if !options.events { eprintln!("… {text}") },
                     Signal::Final(_, text, typed, engine) => final_text = Some((text, typed, engine)),
                     Signal::Error(_, _, message) => error = Some(message),
                     Signal::Closed(_, reason) => {
@@ -141,7 +168,9 @@ pub async fn dictate(options: DictateOptions) -> i32 {
                             if reason == "preempted" {
                                 eprintln!("{}", tr("Another app took over the microphone."));
                             }
-                            if typed {
+                            if options.events {
+                                // The final event carried the text already.
+                            } else if typed {
                                 eprintln!("{}", trf("{0} typed the text.", &[&engine]));
                             } else {
                                 println!("{text}");
@@ -159,7 +188,11 @@ pub async fn dictate(options: DictateOptions) -> i32 {
             }
             line = stdin.next_line(), if stdin_open => {
                 match line {
-                    Ok(Some(_)) => { call("Finish").await; stdin_open = false; }
+                    // Apps: `cancel` cancels, anything else (`finish`, an empty line) finishes.
+                    Ok(Some(l)) if options.events && l.trim() == "cancel" => { call("Cancel").await; stdin_open = false; }
+                    Ok(Some(_)) => { call("Finish").await; if !options.events { stdin_open = false; } }
+                    // Apps: their end (a closed pipe) cancels, so no microphone stays open.
+                    _ if options.events => { call("Cancel").await; stdin_open = false; }
                     // Closed stdin (not a terminal): keep listening until Ctrl+C or the cap.
                     _ => stdin_open = false,
                 }
