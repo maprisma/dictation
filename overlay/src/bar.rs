@@ -343,6 +343,63 @@ mod tests {
         assert_eq!(s.status(), "Listening…");
     }
 
+    struct FakeVoice {
+        state: String,
+    }
+
+    #[zbus::interface(name = "com.maprisma.Voice1")]
+    impl FakeVoice {
+        fn status(&self) -> HashMap<String, zbus::zvariant::OwnedValue> {
+            let mut map = HashMap::new();
+            map.insert("state".into(), zbus::zvariant::OwnedValue::try_from(zbus::zvariant::Value::from(self.state.clone())).unwrap());
+            map.insert("speaking".into(), zbus::zvariant::OwnedValue::try_from(zbus::zvariant::Value::from(false)).unwrap());
+            map
+        }
+        #[zbus(signal)]
+        async fn state(emitter: &zbus::object_server::SignalEmitter<'_>, session: &str, state: &str) -> zbus::Result<()>;
+        #[zbus(signal)]
+        async fn speaking(emitter: &zbus::object_server::SignalEmitter<'_>, id: &str, state: &str, message: &str) -> zbus::Result<()>;
+        #[zbus(signal)]
+        async fn level(emitter: &zbus::object_server::SignalEmitter<'_>, session: &str, rms: f64) -> zbus::Result<()>;
+    }
+
+    /// The watcher on a private bus: the overlay's name, a (fake) voice service's Status and signals.
+    #[tokio::test]
+    #[ignore = "needs a session bus: dbus-run-session -- cargo test -p maprisma-dictation -- --ignored"]
+    async fn watch_on_a_bus() {
+        let _turn = crate::instance::TEST_NAME_LOCK.lock().await;
+        let next = async |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Shown>| tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+        let watcher = zbus::Connection::session().await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move { watch(&watcher, |s| {
+            let _ = tx.send(s);
+        })
+        .await });
+        assert_eq!(next(&mut rx).await, Shown::default());
+        // The overlay opens and closes.
+        let overlay = zbus::connection::Builder::session().unwrap().name(OVERLAY_NAME).unwrap().build().await.unwrap();
+        assert_eq!(next(&mut rx).await.icon(), ICON_OPEN);
+        // The voice service starts while a session listens: Status tells.
+        let voice = zbus::connection::Builder::session().unwrap().serve_at(VOICE_PATH, FakeVoice { state: "listening".into() }).unwrap().name(VOICE_NAME).unwrap().build().await.unwrap();
+        assert_eq!(next(&mut rx).await.voice, Voice::Listening);
+        let emitter = zbus::object_server::SignalEmitter::new(&voice, VOICE_PATH).unwrap();
+        // Levels change nothing (and aren't even delivered); transcribing, done, speaking do.
+        FakeVoice::level(&emitter, "s1", 0.5).await.unwrap();
+        FakeVoice::state(&emitter, "s1", "transcribing").await.unwrap();
+        assert_eq!(next(&mut rx).await.voice, Voice::Transcribing);
+        FakeVoice::state(&emitter, "s1", "done").await.unwrap();
+        assert_eq!(next(&mut rx).await, Shown { open: true, ..Default::default() });
+        FakeVoice::speaking(&emitter, "k1", "speaking", "").await.unwrap();
+        assert_eq!(next(&mut rx).await.icon(), ICON_SPEAKING);
+        // The service goes away while speaking; then the overlay closes.
+        drop(emitter);
+        drop(voice);
+        assert_eq!(next(&mut rx).await.icon(), ICON_OPEN);
+        drop(overlay);
+        assert_eq!(next(&mut rx).await, Shown::default());
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn status_reply() {
         use zbus::zvariant::{OwnedValue, Value};

@@ -76,6 +76,10 @@ pub async fn release() -> bool {
     }
 }
 
+/// Tests that own `com.maprisma.Dictation` on a private bus take turns.
+#[cfg(test)]
+pub static TEST_NAME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +87,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a session bus: dbus-run-session -- cargo test -p maprisma-dictation -- --ignored"]
     async fn single_instance_and_toggle() {
+        let _turn = TEST_NAME_LOCK.lock().await;
         let first = claim().await.unwrap().unwrap();
         let mut commands = take_commands().unwrap();
         assert!(claim().await.unwrap().is_none());
