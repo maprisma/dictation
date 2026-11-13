@@ -22,5 +22,8 @@ libc = "0.2"
 sha2 = "0.10"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
 
+[workspace]
+members = [".", "overlay"]
+
 [profile.release]
 lto = "thin"
