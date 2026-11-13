@@ -311,6 +311,10 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
         _ = int.recv() => {}
         _ = lost.next() => {}
     }
+    // Every session first: an external recorder (Voxtype …) must not go on after we're gone.
+    if !core.shutdown().await {
+        eprintln!("maprisma-voice: a session did not stop in time");
+    }
     let b = backend.clone();
     let _ = tokio::task::spawn_blocking(move || b.stop()).await;
     speech.shutdown();

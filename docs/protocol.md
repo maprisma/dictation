@@ -19,9 +19,11 @@ Only the daemon opens the microphone, and only while a session is `listening`. O
   - `end`:
     - `release` (the default): the client calls `Finish` when the key is released or the button is pressed again.
     - `silence`: the daemon finishes on its own about 0.9 s after speech ends. It cancels with `no_speech` if nothing was said in the first 4 s.
-    - Both modes stop at 60 s with `max_length`.
+    - Both modes stop at 60 s with `max_length`. This also holds by the wall clock (60 s + 5 s), even when the recorder delivers audio slowly.
+    - A recorder that delivers nothing for 5 s has stalled: listening ends (`recorder_stalled`), with what was heard so far, or `RecorderFailed` when nothing came.
   - `language`: `auto` or a Whisper code (`de`, `en`, …). It overrides the setting for this session.
-- A running session is **preempted**: it gets `Final` with what it heard so far, then `Closed("preempted")`.
+- A running session is **preempted**: it gets `Final` with what it heard so far, then `Closed("preempted")`. The new session only starts once the old one has let go of the microphone (or its external engine has stopped). If that takes longer than 20 s, or the external stop fails, `StartSession` fails with `EngineFailed`; two recordings never overlap.
+- When the daemon stops (SIGTERM, SIGINT, the bus going away), it first cancels every session and waits for them (at most 35 s), so an external recorder never goes on after it. They close with `shutdown`.
 - If the calling client leaves the bus, its session is cancelled (`client_gone`).
 - Errors: `Disabled`, `NotReady` (the message says why), `InvalidArgs`, `RecorderFailed`.
 
@@ -29,7 +31,7 @@ Only the daemon opens the microphone, and only while a session is `listening`. O
 Stop listening and transcribe.
 
 ### `Cancel(s session_id)`
-Stop without text (`Closed("cancelled")`).
+Stop without text (`Closed("cancelled")`). If an external engine's cancel fails, the daemon stops it the plain way (Voxtype may then type what it heard). The session then ends with `Error` and `Closed("error")`, never with a clean `cancelled`.
 
 ### `Status() → a{sv}`
 - `state`: `idle`, `listening` or `transcribing`.
@@ -63,7 +65,7 @@ Stops the voice at once.
 | `Final` | `s text`, `a{sv} details` | once at the end. `details`: `typed` (b: an external engine typed the text itself, so `text` is empty), `engine`, `model`, `language`, `audio_ms`, `elapsed_ms` |
 | `Error` | `s code`, `s message` | before `Closed("error")` |
 | `Speaking` | `s speak_id`, `s state`, `s message` | `speaking`, then `done`, `stopped` or `error` (with a message); the first argument is the speak id, not a session |
-| `Closed` | `s reason` | always last: `finished`, `silence`, `max_length`, `no_speech`, `cancelled`, `preempted`, `client_gone`, `recorder_ended` or `error` |
+| `Closed` | `s reason` | always last: `finished`, `silence`, `max_length`, `no_speech`, `cancelled`, `preempted`, `client_gone`, `recorder_ended`, `recorder_stalled`, `shutdown` or `error` |
 
 ## Settings
 `${XDG_CONFIG_HOME:-~/.config}/maprisma-voice/settings.json`. They are read again for every session and every `Status`. Writes are atomic and keep unknown keys; the folder is 0700 and the file 0600.

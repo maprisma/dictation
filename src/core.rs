@@ -20,6 +20,26 @@ pub const MIN_AUDIO_MS: u64 = 250;
 /// External engines: the hard cap (they do their own VAD).
 pub const EXTERNAL_MAX: Duration = Duration::from_secs(60);
 
+/// Time limits that don't depend on audio coming in.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// A recorder that delivers no chunk for this long has stalled: listening ends.
+    pub stall: Duration,
+    /// Slack on top of the VAD's `max_ms`: the wall-clock cap of a recorded session.
+    pub wall_slack: Duration,
+    /// How long a new session waits for the preempted one to let go of the microphone
+    /// (an external engine's stop may take its full 15 s).
+    pub release: Duration,
+    /// How long shutdown waits for every session to stop.
+    pub shutdown: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { stall: Duration::from_secs(5), wall_slack: Duration::from_secs(5), release: Duration::from_secs(20), shutdown: Duration::from_secs(35) }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Dictate,
@@ -105,7 +125,8 @@ pub trait Backend: Send + Sync + 'static {
 enum Control {
     Finish,
     Cancel(&'static str),
-    Preempt(oneshot::Sender<()>),
+    /// Answered `true` once the microphone (or the external recorder) is released.
+    Preempt(oneshot::Sender<bool>),
 }
 
 struct Live {
@@ -132,14 +153,19 @@ pub struct Core {
     inner: Arc<Mutex<Inner>>,
     starting: tokio::sync::Mutex<()>,
     vad: VadConfig,
+    limits: Limits,
     prefix: String,
 }
 
 impl Core {
     pub fn new(backend: Arc<dyn Backend>, vad: VadConfig) -> (Arc<Core>, mpsc::UnboundedReceiver<Event>) {
+        Core::with_limits(backend, vad, Limits::default())
+    }
+
+    pub fn with_limits(backend: Arc<dyn Backend>, vad: VadConfig, limits: Limits) -> (Arc<Core>, mpsc::UnboundedReceiver<Event>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let core = Core { backend, events: tx, inner: Arc::default(), starting: tokio::sync::Mutex::new(()), vad, prefix: format!("{started:x}") };
+        let core = Core { backend, events: tx, inner: Arc::default(), starting: tokio::sync::Mutex::new(()), vad, limits, prefix: format!("{started:x}") };
         (Arc::new(core), rx)
     }
 
@@ -154,7 +180,8 @@ impl Core {
         let backend = self.backend.clone();
         let req = request.clone();
         let prepared = tokio::task::spawn_blocking(move || backend.prepare(&req)).await.map_err(|e| VoiceError::engine(e.to_string()))??;
-        // Preempt the current listener and wait (briefly) until it let go of the microphone.
+        // Preempt the current listener and wait until it let go of the microphone: never two
+        // recorders at once, and an old external stop can't hit the new recording.
         let current = {
             let inner = self.lock();
             inner.current.as_ref().and_then(|id| inner.sessions.get(id)).filter(|l| l.state == "listening").map(|l| l.control.clone())
@@ -162,7 +189,12 @@ impl Core {
         if let Some(control) = current {
             let (tx, rx) = oneshot::channel();
             if control.send(Control::Preempt(tx)).is_ok() {
-                let _ = tokio::time::timeout(Duration::from_secs(3), rx).await;
+                match tokio::time::timeout(self.limits.release, rx).await {
+                    // released, or the session ended by itself (its task is gone)
+                    Ok(Ok(true)) | Ok(Err(_)) => {}
+                    Ok(Ok(false)) => return Err(VoiceError::engine("the previous session's recording could not be stopped")),
+                    Err(_) => return Err(VoiceError::engine("the previous session did not release the microphone in time")),
+                }
             }
         }
         let engine = prepared.engine.clone();
@@ -210,6 +242,23 @@ impl Core {
     /// Whether the session still runs (not closed yet).
     pub fn is_open(&self, id: &str) -> bool {
         self.lock().sessions.contains_key(id)
+    }
+
+    /// Stops every session (recorders and external engines) and waits until they are closed,
+    /// at most `Limits::shutdown`. Returns whether all of them closed.
+    pub async fn shutdown(&self) -> bool {
+        let controls: Vec<_> = self.lock().sessions.values().map(|l| l.control.clone()).collect();
+        for c in controls {
+            let _ = c.send(Control::Cancel("shutdown"));
+        }
+        let until = Instant::now() + self.limits.shutdown;
+        while !self.lock().sessions.is_empty() {
+            if Instant::now() >= until {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        true
     }
 
     /// The client that started it left the bus.
@@ -282,11 +331,17 @@ impl Core {
         let mut partial_running = false;
         let mut last_partial_ms = 0u64;
         let mut last_partial = String::new();
-        let mut preempted: Option<oneshot::Sender<()>> = None;
+        let mut preempted: Option<oneshot::Sender<bool>> = None;
         let mut cancel: Option<&'static str> = None;
         let mut recorder_ended = false;
+        // Wall-clock limits: the VAD only counts audio that came in, a stalled recorder sends none.
+        let hard_end = tokio::time::Instant::now() + Duration::from_millis(u64::from(self.vad.max_ms)) + self.limits.wall_slack;
+        let stall = tokio::time::sleep(self.limits.stall);
+        tokio::pin!(stall);
         let reason: &'static str = loop {
             tokio::select! {
+                _ = tokio::time::sleep_until(hard_end) => break "max_length",
+                _ = &mut stall => { recorder_ended = true; break "recorder_stalled" }
                 c = control.recv() => match c {
                     Some(Control::Finish) | None => break "finished",
                     Some(Control::Cancel(r)) => { cancel = Some(r); break r }
@@ -294,6 +349,7 @@ impl Core {
                 },
                 chunk = capture.chunks.recv() => {
                     let Some(chunk) = chunk else { recorder_ended = true; break "recorder_ended" };
+                    stall.as_mut().reset(tokio::time::Instant::now() + self.limits.stall);
                     let level = audio::rms(&chunk);
                     let ms = audio::ms_of(chunk.len()) as u32;
                     pcm.extend_from_slice(&chunk);
@@ -327,7 +383,7 @@ impl Core {
         (capture.stop)();
         drop(capture.chunks);
         if let Some(ack) = preempted {
-            let _ = ack.send(());
+            let _ = ack.send(true);
         }
         if let Some(r) = cancel {
             self.set_state(&id, "cancelled");
@@ -355,7 +411,7 @@ impl Core {
                             return;
                         }
                         // Already off the microphone.
-                        Some(Control::Preempt(ack)) => { let _ = ack.send(()); }
+                        Some(Control::Preempt(ack)) => { let _ = ack.send(true); }
                         Some(Control::Finish) => {}
                         None => {}
                     },
@@ -386,11 +442,22 @@ impl Core {
             _ = tokio::time::sleep(EXTERNAL_MAX) => ("max_length", false),
         };
         let e = engine.clone();
-        let stopped = tokio::task::spawn_blocking(move || e.stop(cancel)).await.unwrap_or_else(|e| Err(VoiceError::engine(e.to_string())));
-        if let Some(ack) = preempted {
-            let _ = ack.send(());
+        let mut stopped = tokio::task::spawn_blocking(move || e.stop(cancel)).await.unwrap_or_else(|e| Err(VoiceError::engine(e.to_string())));
+        if cancel && stopped.is_err() {
+            // Cancelling failed (the recorder may still run): stop it the plain way (it may
+            // type what it heard), and say so instead of reporting a clean cancel.
+            let e = engine.clone();
+            let plain = tokio::task::spawn_blocking(move || e.stop(false)).await.unwrap_or_else(|e| Err(VoiceError::engine(e.to_string())));
+            let first = stopped.unwrap_err();
+            stopped = Err(match plain {
+                Ok(()) => VoiceError::engine(format!("cancelling did not work, so it was stopped instead (it may type what it heard): {}", first.message)),
+                Err(again) => VoiceError::engine(format!("the recording could not be stopped: {}; {}", first.message, again.message)),
+            });
         }
-        if cancel {
+        if let Some(ack) = preempted {
+            let _ = ack.send(stopped.is_ok());
+        }
+        if cancel && stopped.is_ok() {
             self.set_state(&id, "cancelled");
             self.close(&id, reason);
             return;
@@ -421,11 +488,19 @@ pub mod tests {
         pub external: bool,
         pub calls: AtomicUsize,
         pub log: Mutex<Vec<String>>,
+        /// External stop takes this long.
+        pub stop_delay: Duration,
+        /// `stop(true)` fails / `stop(false)` fails.
+        pub cancel_fails: bool,
+        pub stop_fails: bool,
     }
 
     impl FakeEngine {
         pub fn new(text: &str) -> Self {
-            FakeEngine { text: text.into(), fail: false, partials: false, external: false, calls: AtomicUsize::new(0), log: Mutex::default() }
+            FakeEngine { text: text.into(), fail: false, partials: false, external: false, calls: AtomicUsize::new(0), log: Mutex::default(), stop_delay: Duration::ZERO, cancel_fails: false, stop_fails: false }
+        }
+        pub fn external() -> Self {
+            FakeEngine { external: true, ..FakeEngine::new("") }
         }
     }
 
@@ -452,8 +527,9 @@ pub mod tests {
             Ok(())
         }
         fn stop(&self, cancel: bool) -> Result<(), VoiceError> {
+            std::thread::sleep(self.stop_delay);
             self.log.lock().unwrap().push(format!("stop {cancel}"));
-            Ok(())
+            if (cancel && self.cancel_fails) || (!cancel && self.stop_fails) { Err(VoiceError::engine("no daemon")) } else { Ok(()) }
         }
     }
 
@@ -462,6 +538,11 @@ pub mod tests {
         pub engine: Arc<FakeEngine>,
         pub audio: Mutex<Vec<(Vec<i16>, bool)>>,
         pub captures: AtomicUsize,
+        /// The next capture opens and never delivers a chunk (a stalled device).
+        pub stall: std::sync::atomic::AtomicBool,
+        /// The next capture sends one sample every 20 ms (the VAD's audio clock crawls).
+        pub trickle: std::sync::atomic::AtomicBool,
+        pub held: Mutex<Vec<mpsc::Sender<Vec<i16>>>>,
     }
 
     impl Backend for FakeBackend {
@@ -470,6 +551,18 @@ pub mod tests {
         }
         fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
             self.captures.fetch_add(1, Ordering::SeqCst);
+            if self.stall.swap(false, Ordering::SeqCst) {
+                let (tx, rx) = mpsc::channel(4);
+                self.held.lock().unwrap().push(tx);
+                return Ok(Capture { chunks: rx, stop: Box::new(|| {}) });
+            }
+            if self.trickle.swap(false, Ordering::SeqCst) {
+                let (tx, rx) = mpsc::channel(4);
+                std::thread::spawn(move || while tx.blocking_send(vec![0]).is_ok() {
+                    std::thread::sleep(Duration::from_millis(20));
+                });
+                return Ok(Capture { chunks: rx, stop: Box::new(|| {}) });
+            }
             let mut audio = self.audio.lock().unwrap();
             let (samples, more) = if audio.is_empty() { (vec![], true) } else { audio.remove(0) };
             Ok(Capture::from_samples(samples, more))
@@ -483,9 +576,17 @@ pub mod tests {
 
     fn setup(engine: FakeEngine, audio: Vec<(Vec<i16>, bool)>) -> (Arc<Core>, mpsc::UnboundedReceiver<Event>, Arc<FakeEngine>) {
         let engine = Arc::new(engine);
-        let backend = Arc::new(FakeBackend { engine: engine.clone(), audio: Mutex::new(audio), captures: AtomicUsize::new(0) });
+        let backend = Arc::new(FakeBackend { engine: engine.clone(), audio: Mutex::new(audio), captures: AtomicUsize::new(0), stall: Default::default(), trickle: Default::default(), held: Mutex::default() });
         let (core, rx) = Core::new(backend, VadConfig::default());
         (core, rx, engine)
+    }
+
+    fn fake_backend(engine: Arc<FakeEngine>) -> Arc<FakeBackend> {
+        Arc::new(FakeBackend { engine, audio: Mutex::default(), captures: AtomicUsize::new(0), stall: Default::default(), trickle: Default::default(), held: Mutex::default() })
+    }
+
+    fn quick() -> Limits {
+        Limits { stall: Duration::from_millis(300), wall_slack: Duration::from_millis(200), release: Duration::from_millis(400), shutdown: Duration::from_secs(5) }
     }
 
     fn request(app: &str, end: End) -> SessionRequest {
@@ -646,10 +747,8 @@ pub mod tests {
 
     #[tokio::test]
     async fn external_engines_type_themselves() {
-        let mut ext = FakeEngine::new("");
-        ext.external = true;
-        let engine = Arc::new(ext);
-        let backend = Arc::new(FakeBackend { engine: engine.clone(), audio: Mutex::default(), captures: AtomicUsize::new(0) });
+        let engine = Arc::new(FakeEngine::external());
+        let backend = fake_backend(engine.clone());
         let (core, mut rx) = Core::new(backend.clone(), VadConfig::default());
         let id = core.start_session(request("app", End::Silence)).await.unwrap();
         core.finish(&id).unwrap();
@@ -671,5 +770,120 @@ pub mod tests {
         assert_eq!(*engine.log.lock().unwrap(), ["start", "stop false", "start", "stop false", "start", "stop true"]);
         // The microphone was never opened.
         assert_eq!(backend.captures.load(Ordering::SeqCst), 0);
+    }
+
+    /// Shutdown stops an external recording (and a recorded one) and waits until they closed.
+    #[tokio::test]
+    async fn shutdown_stops_every_session() {
+        let engine = Arc::new(FakeEngine::external());
+        let (core, mut rx) = Core::new(fake_backend(engine.clone()), VadConfig::default());
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        assert!(core.shutdown().await);
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        assert_eq!(seen.last(), Some(&Event::Closed { id, reason: "shutdown".into() }));
+        assert_eq!(*engine.log.lock().unwrap(), ["start", "stop true"]);
+        assert_eq!(core.status()["sessions"], 0);
+        // a recorded one
+        let (core, mut rx, _) = setup(FakeEngine::new("x"), vec![(vec![], true)]);
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        assert!(core.shutdown().await);
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        assert!(!seen.iter().any(|e| matches!(e, Event::Final { .. })));
+        assert_eq!(core.status()["state"], "idle");
+    }
+
+    /// A failed external cancel is not reported as a clean cancel: the plain stop is tried and
+    /// the session ends with an error.
+    #[tokio::test]
+    async fn failed_external_cancel_is_an_error() {
+        let mut ext = FakeEngine::external();
+        ext.cancel_fails = true;
+        let engine = Arc::new(ext);
+        let (core, mut rx) = Core::new(fake_backend(engine.clone()), VadConfig::default());
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        core.cancel(&id).unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        assert!(seen.iter().any(|e| matches!(e, Event::Error { message, .. } if message.contains("stopped instead"))), "{seen:?}");
+        assert_eq!(seen.last(), Some(&Event::Closed { id, reason: "error".into() }));
+        assert_eq!(*engine.log.lock().unwrap(), ["start", "stop true", "stop false"]);
+        // both fail: the error says it could not be stopped
+        let mut ext = FakeEngine::external();
+        ext.cancel_fails = true;
+        ext.stop_fails = true;
+        let (core, mut rx) = Core::new(fake_backend(Arc::new(ext)), VadConfig::default());
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        core.cancel(&id).unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        assert!(seen.iter().any(|e| matches!(e, Event::Error { message, .. } if message.contains("could not be stopped"))), "{seen:?}");
+    }
+
+    /// A recorder that opens but never delivers audio: the stall limit ends listening (no
+    /// endless session), and with no audio it is a recorder error.
+    #[tokio::test]
+    async fn stalled_recorder_ends() {
+        let engine = Arc::new(FakeEngine::new("x"));
+        let backend = fake_backend(engine);
+        backend.stall.store(true, Ordering::SeqCst);
+        let (core, mut rx) = Core::with_limits(backend.clone(), VadConfig::default(), quick());
+        let started = Instant::now();
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(seen.iter().any(|e| matches!(e, Event::Error { code: "recorder_failed", .. })), "{seen:?}");
+        assert_eq!(backend.held.lock().unwrap().len(), 1, "the stalled capture's sender is still held");
+    }
+
+    /// The wall-clock cap holds even when the VAD's audio clock runs slow.
+    #[tokio::test]
+    async fn wall_clock_cap() {
+        let vad = VadConfig { max_ms: 300, ..VadConfig::default() };
+        let engine = Arc::new(FakeEngine::new("x"));
+        let backend = fake_backend(engine);
+        backend.trickle.store(true, Ordering::SeqCst);
+        // 1 ms of audio per 20 ms: the VAD would take 6 s to reach its 300 ms
+        let started = Instant::now();
+        let (core, mut rx) = Core::with_limits(backend, vad, Limits { stall: Duration::from_secs(5), wall_slack: Duration::from_millis(100), ..quick() });
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        assert_eq!(seen.last(), Some(&Event::Closed { id, reason: "max_length".into() }));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A new session never starts while the preempted one's recording is still being stopped:
+    /// a stop slower than the release limit, or a failed stop, refuses the new session.
+    #[tokio::test]
+    async fn preemption_waits_for_release() {
+        let mut ext = FakeEngine::external();
+        ext.stop_delay = Duration::from_millis(1000);
+        let engine = Arc::new(ext);
+        let (core, mut rx) = Core::with_limits(fake_backend(engine.clone()), VadConfig::default(), quick());
+        let a = core.start_session(request("a", End::Release)).await.unwrap();
+        let err = core.start_session(request("b", End::Release)).await.unwrap_err();
+        assert!(err.message.contains("in time"), "{}", err.message);
+        let mut seen = vec![];
+        until_closed(&mut rx, &a, &mut seen).await;
+        // only one start: the second never ran
+        assert_eq!(*engine.log.lock().unwrap(), ["start", "stop false"]);
+        // a failed stop refuses too
+        let mut ext = FakeEngine::external();
+        ext.stop_fails = true;
+        let engine = Arc::new(ext);
+        let (core, _rx) = Core::with_limits(fake_backend(engine.clone()), VadConfig::default(), quick());
+        core.start_session(request("a", End::Release)).await.unwrap();
+        let err = core.start_session(request("b", End::Release)).await.unwrap_err();
+        assert!(err.message.contains("could not be stopped"), "{}", err.message);
+        assert_eq!(*engine.log.lock().unwrap(), ["start", "stop false"]);
+        // a quick stop: the new one starts after the old one released
+        let engine = Arc::new(FakeEngine::external());
+        let (core, _rx) = Core::with_limits(fake_backend(engine.clone()), VadConfig::default(), quick());
+        core.start_session(request("a", End::Release)).await.unwrap();
+        core.start_session(request("b", End::Release)).await.unwrap();
+        assert_eq!(*engine.log.lock().unwrap(), ["start", "stop false", "start"]);
     }
 }
