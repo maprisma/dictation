@@ -126,14 +126,23 @@ is not simple, and `run_command` with Enter covers the rare need.
   click confirms; speech never does: a spoken "yes" is a new question, and any new question cancels
   the card. Cancelling a card also drops the actions after it.
 - **2** never runs; a "blocked" chip says why. `run_command` is blocked when its program (also
-  behind `env`, `nice`, `timeout`, `setsid` …) is: `sudo`, `pkexec`, `su`, `doas`, `run0` …;
+  behind `env`, `nice`, `timeout`, `setsid`, `flock`, `taskset`, `chrt`, `systemd-run` …; their
+  options are not parsed: **every** tail of the argv after a wrapper is judged, so an option value
+  like `env -u HOME rm` or `timeout -s KILL 10 rm` can't hide the program, and `env -S` /
+  `--split-string` and `systemd-run -p Exec…` are blocked outright) is: `sudo`, `pkexec`, `su`, `doas`, `run0` …;
   a package tool (pacman, yay, paru, flatpak install/remove, pip/cargo install, npm -g …); a deleter
   (`rm`, `shred`, `find -delete/-exec`, `git clean`, `rsync --delete`); disk and system tools
   (`dd`, `mkfs*`, `mount`, `systemctl reboot` …); autostart (`systemctl enable/disable`, `crontab`)
   or any argument naming autostart/shell profiles (`.bashrc`, `.profile`, `config.fish`,
-  `~/.config/autostart`, `environment.d` …); secrets (`~/.ssh`, `~/.gnupg`, keyrings, kwallet,
+  `~/.config/autostart`, `environment.d`, `~/.config/hypr/`, `hyprland.conf`,
+  `~/.local/share/applications/`, `mimeapps.list`, `~/.config/plasma-workspace/`,
+  `~/.local/share/kwin/scripts/`, COSMIC's `com.system76.CosmicSettings.Shortcuts` …); secrets (`~/.ssh`, `~/.gnupg`, keyrings, kwallet,
   `*.env`, `.netrc`, key files, `gpg`, `secret-tool`, `pass` …); and shells, interpreters and other
-  ways to hide what runs (`sh -c`, `python`, `xargs`, `ssh`, `hyprctl dispatch exec` …).
+  ways to hide what runs (`sh -c`, `python`, `xargs`, `ssh`, `hyprctl dispatch exec`; a terminal
+  emulator given a command or anything beyond plain options — `kitty rm x`, `foot …`,
+  `alacritty -e`, `gnome-terminal --`, `xdg-terminal-exec …`; `git -c …`, `--config-env`,
+  `rebase --exec`, `submodule foreach`, `bisect run`, `ext::` URLs, `git config` of aliases,
+  `core.*`, helpers or pagers; `make`/`just`, which run the recipes they find …).
 - **Outside text taints**: when the request is a follow-up of an answer that read outside text (a
   weather result) or looks pasted (more than two lines or 600 characters), its level-0 actions
   need Enter too; so does every level-0 action after a weather lookup in the same answer.

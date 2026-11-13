@@ -41,42 +41,76 @@ fn base(program: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
 }
 
-/// Wrappers that run the rest of the argv as the real command.
-fn wrapper_skip(argv: &[String]) -> Option<usize> {
-    let mut i = 1;
-    match base(&argv[0]) {
-        "env" => {
-            while i < argv.len() && (argv[i].starts_with('-') || argv[i].contains('=')) {
-                i += 1;
-            }
-        }
-        "nice" | "ionice" | "nohup" | "setsid" | "stdbuf" | "time" | "chrt" | "taskset" | "flock" | "unbuffer" | "systemd-run" | "uwsm" | "uwsm-app" | "app2unit" => {
-            // their options, and a value right after an option (nice -n 5, timeout 10 …)
-            while i < argv.len() && argv[i].starts_with('-') {
-                i += 1;
-                if i < argv.len() && argv[i].chars().all(|c| c.is_ascii_digit()) {
-                    i += 1;
-                }
-            }
-            if base(&argv[0]) == "uwsm" && argv.get(i).is_some_and(|a| a == "app") {
-                i += 1;
-                while i < argv.len() && argv[i].starts_with('-') && argv[i] != "--" {
-                    i += 1;
-                }
-            }
-            if argv.get(i).is_some_and(|a| a == "--") {
-                i += 1;
-            }
-        }
-        "timeout" => {
-            while i < argv.len() && argv[i].starts_with('-') {
-                i += 1;
-            }
-            i += 1; // the duration
-        }
-        _ => return None,
+/// Wrappers that run (part of) the rest of their argv as the real command. Their options are
+/// not parsed: which argument is the program depends on each option's value, so every suffix of
+/// the argv is judged instead (fail closed).
+const WRAPPERS: &[&str] = &[
+    "env", "nice", "ionice", "nohup", "setsid", "stdbuf", "time", "chrt", "taskset", "flock", "unbuffer", "systemd-run", "systemd-inhibit", "uwsm", "uwsm-app", "app2unit", "timeout", "prlimit", "numactl", "dbus-run-session", "dbus-launch", "gamemoderun", "prime-run", "mangohud", "cgexec",
+];
+
+fn is_wrapper(program: &str) -> bool {
+    WRAPPERS.contains(&base(program).to_ascii_lowercase().as_str())
+}
+
+/// A wrapper option that itself turns text into a command line (`env -S "rm x"`), or a unit
+/// property that runs commands (`systemd-run -p ExecStartPre=…`).
+fn wrapper_runs_text(argv: &[String]) -> bool {
+    match base(&argv[0]).to_ascii_lowercase().as_str() {
+        "env" => argv[1..].iter().any(|a| {
+            a.starts_with("--split-string") || (a.starts_with('-') && !a.starts_with("--") && a[1..].contains('S'))
+        }),
+        "systemd-run" => argv[1..].iter().any(|a| a.contains("Exec")),
+        _ => false,
     }
-    Some(i)
+}
+
+/// Terminal emulators: plain "open a terminal" is fine, but any way to make them run a command
+/// (`-e`, `--command`, `--`, a trailing command, a shell/program setting) is a shell.
+const TERMINALS: &[&str] = &[
+    "kitty", "kitten", "alacritty", "konsole", "foot", "footclient", "wezterm", "wezterm-gui", "ghostty", "gnome-terminal", "kgx", "ptyxis", "cosmic-term", "xterm", "uxterm", "urxvt", "rxvt", "st", "xfce4-terminal", "tilix", "terminator", "lxterminal", "qterminal", "terminology", "rio", "contour", "tilda", "yakuake", "xdg-terminal-exec",
+];
+
+fn terminal_runs_command(argv: &[String]) -> bool {
+    let program = base(&argv[0]).to_ascii_lowercase();
+    if program == "xdg-terminal-exec" || program == "kitten" {
+        return argv.len() > 1;
+    }
+    argv[1..].iter().any(|a| {
+        let l = a.to_ascii_lowercase();
+        !a.starts_with('-')
+            || a == "--"
+            || a == "-e"
+            || a == "-x"
+            || l.starts_with("--command")
+            || l.starts_with("--exec")
+            || l.starts_with("-e=")
+            || (a.starts_with('-') && !a.starts_with("--") && a.len() > 2 && a[1..].contains('e'))
+            || ["shell", "prog", "command", "exec", "session", "config", "hold", "startup"].iter().any(|w| l.contains(w))
+    })
+}
+
+/// `git` options and subcommands that run a program or a configured command.
+fn git_runs_command(argv: &[String]) -> bool {
+    argv[1..].iter().enumerate().any(|(i, a)| {
+        let l = a.to_ascii_lowercase();
+        a == "-c"
+            || (a.starts_with("-c") && !a.starts_with("--") && a.len() > 2)
+            || l.starts_with("--config-env")
+            || l.starts_with("--exec-path=")
+            || l.starts_with("--upload-pack")
+            || l.starts_with("--receive-pack")
+            || l.starts_with("--exec")
+            || l.starts_with("--extcmd")
+            || a == "-x"
+            || l.starts_with("ext::")
+            || ["foreach", "filter-branch", "filter-repo"].contains(&l.as_str())
+            || (l == "run" && i > 0 && argv[i] == "bisect")
+            || (l == "config"
+                && argv[i + 2..].iter().any(|v| {
+                    let v = v.to_ascii_lowercase();
+                    v.contains('!') || ["alias", "core.", "command", "helper", "program", "editor", "pager", "hook", "filter", "difftool", "mergetool", "url."].iter().any(|w| v.contains(w))
+                }))
+    })
 }
 
 fn has(argv: &[String], words: &[&str]) -> bool {
@@ -99,8 +133,24 @@ fn secret_path(arg: &str) -> bool {
 fn startup_path(arg: &str) -> bool {
     let a = arg.to_ascii_lowercase();
     let file = a.rsplit('/').next().unwrap_or(&a);
-    ["autostart", ".config/systemd", "environment.d", ".config/fish", "/etc/profile", "/etc/xdg", "plasma-workspace/env", "plasma-workspace/shutdown", "cron"].iter().any(|s| a.contains(s))
-        || [".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".xprofile", ".xinitrc", ".xsession", ".pam_environment", "config.fish"].contains(&file)
+    [
+        "autostart",
+        ".config/systemd",
+        "environment.d",
+        ".config/fish",
+        "/etc/profile",
+        "/etc/xdg",
+        ".config/plasma-workspace",
+        "cron",
+        // Hyprland's config runs `exec`/`exec-once` lines; .desktop files and the defaults list
+        // decide what an app name or a file opens; KWin scripts run inside the compositor;
+        // COSMIC's custom shortcuts spawn commands.
+        ".config/hypr",
+        ".local/share/applications",
+        ".local/share/kwin/scripts",
+        "com.system76.cosmicsettings.shortcuts",
+    ].iter().any(|s| a.contains(s))
+        || [".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".xprofile", ".xinitrc", ".xsession", ".pam_environment", "config.fish", "hyprland.conf", "mimeapps.list"].contains(&file)
 }
 
 /// Why this argv must never run (None: it may, after Enter).
@@ -108,13 +158,31 @@ pub fn blocked_argv(argv: &[String]) -> Option<&'static str> {
     if argv.is_empty() {
         return Some(WHY_SHELL);
     }
-    if let Some(skip) = wrapper_skip(argv) {
-        // `env`, `nice`, `timeout` … : judge the command they run (and the wrapper's own args).
-        if let Some(why) = argv[1..skip.min(argv.len())].iter().find_map(|a| if secret_path(a) { Some(WHY_SECRETS) } else if startup_path(a) { Some(WHY_AUTOSTART) } else { None }) {
-            return Some(why);
+    if is_wrapper(&argv[0]) {
+        // `env`, `nice`, `timeout`, `flock` … : judge every suffix argv[k..], since an option's
+        // value (`env -u HOME rm`, `timeout -s KILL 10 rm`) must not be taken for the program.
+        for k in 0..argv.len() {
+            let rest = &argv[k..];
+            let why = if is_wrapper(&rest[0]) {
+                if wrapper_runs_text(rest) {
+                    Some(WHY_SHELL)
+                } else {
+                    rest[1..].iter().find_map(|a| if secret_path(a) { Some(WHY_SECRETS) } else if startup_path(a) { Some(WHY_AUTOSTART) } else { None })
+                }
+            } else {
+                blocked_plain(rest)
+            };
+            if why.is_some() {
+                return why;
+            }
         }
-        return if skip >= argv.len() { None } else { blocked_argv(&argv[skip..]) };
+        return None;
     }
+    blocked_plain(argv)
+}
+
+/// `blocked_argv` for an argv whose program is not a wrapper.
+fn blocked_plain(argv: &[String]) -> Option<&'static str> {
     let program = base(&argv[0]).to_ascii_lowercase();
     let p = program.as_str();
     if ["sudo", "doas", "pkexec", "su", "run0", "sudoedit", "polkit-agent-helper-1", "machinectl", "chpasswd", "passwd", "usermod", "useradd", "userdel", "groupadd", "visudo"].contains(&p) {
@@ -152,6 +220,16 @@ pub fn blocked_argv(argv: &[String]) -> Option<&'static str> {
         return Some(WHY_SHELL);
     }
     if interpreters.contains(&p) || plain_py {
+        return Some(WHY_SHELL);
+    }
+    if TERMINALS.contains(&p) && terminal_runs_command(argv) {
+        return Some(WHY_SHELL);
+    }
+    if p == "git" && git_runs_command(argv) {
+        return Some(WHY_SHELL);
+    }
+    if ["make", "gmake", "bmake", "just"].contains(&p) {
+        // runs whatever recipes the Makefile/justfile holds
         return Some(WHY_SHELL);
     }
     if ["hyprctl", "kwin", "qdbus", "qdbus6", "dbus-send", "busctl", "gdbus"].contains(&p) && argv.iter().any(|a| a.contains("exec") || a.contains("Exec") || a.contains("loadScript") || a.contains("eval") || a.contains("keyword")) {
@@ -270,6 +348,115 @@ mod tests {
         for ok in ["uname -r", "ls -la /tmp", "df -h", "flatpak list", "pacman-like", "git status", "systemctl --user status pipewire", "env", "gio trash x", "hyprctl clients", "cargo build", "npm install"] {
             assert_eq!(blocked_argv(&argv(ok)), None, "{ok}");
         }
+    }
+
+    /// argv given as a list (elements may hold spaces).
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn wrappers_fail_closed() {
+        // an option value must not be taken for the program
+        for (cmd, why) in [
+            ("env -u HOME rm x", WHY_DELETE),
+            ("env -C /tmp rm x", WHY_DELETE),
+            ("flock /tmp/l rm -rf /tmp/x", WHY_DELETE),
+            ("timeout -s KILL 10 rm x", WHY_DELETE),
+            ("timeout --signal KILL 10 sudo x", WHY_ADMIN),
+            ("taskset 0x1 rm x", WHY_DELETE),
+            ("taskset -c 0-3 pacman -Syu", WHY_PACKAGES),
+            ("systemd-run --unit x rm x", WHY_DELETE),
+            ("systemd-run --user --unit=x --property Nice=5 rm x", WHY_DELETE),
+            ("chrt 10 rm x", WHY_DELETE),
+            ("chrt -r 10 rm x", WHY_DELETE),
+            ("ionice -c 3 rm x", WHY_DELETE),
+            ("nice -n 5 env -u X nohup timeout 5 rm x", WHY_DELETE),
+            ("stdbuf -o L rm x", WHY_DELETE),
+            ("uwsm app -- rm x", WHY_DELETE),
+            ("env -u HOME cat /home/u/.ssh/id_rsa", WHY_SECRETS),
+            ("flock /home/u/.bashrc true", WHY_AUTOSTART),
+            ("systemd-run -p ExecStartPre=/bin/true true", WHY_SHELL),
+            ("env -iS x", WHY_SHELL),
+        ] {
+            assert_eq!(blocked_argv(&argv(cmd)), Some(why), "{cmd}");
+        }
+        // `env -S` splits a string into a command line: blocked outright
+        for cmd in [&["env", "-S", "rm /tmp/victim"][..], &["env", "--split-string=rm x"], &["env", "--split-string", "ls"], &["/usr/bin/env", "-vS", "true"], &["nice", "env", "-S", "true"]] {
+            assert_eq!(blocked_argv(&list(cmd)), Some(WHY_SHELL), "{cmd:?}");
+        }
+        for ok in ["nice -n 5 cargo build", "timeout 10 uname -r", "env FOO=1 uname", "env -u HOME ls", "taskset 0x1 df -h", "setsid -f firefox"] {
+            assert_eq!(blocked_argv(&argv(ok)), None, "{ok}");
+        }
+        // a long chain of wrappers stays cheap (no exponential recursion)
+        let mut chain = vec!["env"; 30];
+        chain.push("rm");
+        assert_eq!(blocked_argv(&list(&chain)), Some(WHY_DELETE));
+    }
+
+    #[test]
+    fn command_runners() {
+        for cmd in [
+            "kitty rm x",
+            "kitty -e rm x",
+            "kitty --hold sh",
+            "kitty -o shell=rm",
+            "kitten @ launch rm",
+            "alacritty -e rm x",
+            "alacritty --command rm x",
+            "konsole -e rm",
+            "foot rm x",
+            "footclient rm x",
+            "wezterm start -- rm x",
+            "ghostty -e rm",
+            "gnome-terminal -- rm x",
+            "cosmic-term -e rm",
+            "xterm -e rm",
+            "xterm -hold -e rm",
+            "/usr/bin/xdg-terminal-exec rm x",
+            "git -c alias.x=!rm x",
+            "git -c core.sshCommand=rm fetch",
+            "git -c core.pager=rm log",
+            "git -ccore.pager=rm log",
+            "git --config-env=core.pager=X log",
+            "git config alias.x !rm",
+            "git config --global core.pager rm",
+            "git rebase --exec rm HEAD~1",
+            "git rebase -x rm HEAD~1",
+            "git submodule foreach rm",
+            "git bisect run rm",
+            "git clone ext::rm",
+            "git clone --upload-pack=rm x",
+            "make",
+            "make install",
+            "/usr/bin/gmake -C /tmp",
+            "just",
+            "env make",
+        ] {
+            assert_eq!(blocked_argv(&argv(cmd)), Some(WHY_SHELL), "{cmd}");
+        }
+        for ok in ["kitty", "alacritty", "foot", "konsole", "git log --oneline", "git -C /tmp status", "git config --get user.name", "git diff --cached"] {
+            assert_eq!(blocked_argv(&argv(ok)), None, "{ok}");
+        }
+    }
+
+    #[test]
+    fn startup_paths() {
+        for cmd in [
+            "cp x /home/u/.config/hypr/hyprland.conf",
+            "tee -a /home/u/.config/hypr/autoexec.conf",
+            "ln -s x /home/u/.config/hypr",
+            "cp x hyprland.conf",
+            "cp x /home/u/.local/share/applications/firefox.desktop",
+            "tee /home/u/.config/mimeapps.list",
+            "cp x /home/u/.config/plasma-workspace/env/x.sh",
+            "cp x /home/u/.config/plasma-workspace/shutdown/x.sh",
+            "cp -r x /home/u/.local/share/kwin/scripts/x",
+            "cp x /home/u/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom",
+        ] {
+            assert_eq!(blocked_argv(&argv(cmd)), Some(WHY_AUTOSTART), "{cmd}");
+        }
+        assert_eq!(blocked_argv(&argv("ls /home/u/.config/cosmic")), None);
     }
 
     #[test]
