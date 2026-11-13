@@ -355,7 +355,7 @@ impl Overlay {
         self.cancel_ask();
         let generation = self.ask_gen;
         let context = helper::follow_up(self.last.as_ref(), crate::last::now()).cloned();
-        let language = maprisma_voice::i18n::LANGUAGES[current_language()].0.to_string();
+        let language = ui_language(&self.settings.language);
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into());
         let demo = self.flags.demo;
         let work = async move {
@@ -615,9 +615,13 @@ fn code_box(theme: &cosmic::Theme) -> iced_container::Style {
     iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().control.into(), ..Default::default() }, ..Default::default() }
 }
 
-fn current_language() -> usize {
-    let probe = tr("Cancelled.");
-    (0..maprisma_voice::i18n::LANGUAGES.len()).find(|i| maprisma_voice::i18n::tr_in(*i, "Cancelled.") == probe).unwrap_or(0)
+/// The overlay's language code (the setting, or the session's for "system").
+fn ui_language(setting: &str) -> String {
+    if setting != "system" {
+        return setting.to_string();
+    }
+    let values = ["LC_ALL", "LC_MESSAGES", "LANG"].map(|k| std::env::var(k).unwrap_or_default());
+    maprisma_voice::i18n::system_language([&values[0], &values[1], &values[2]]).to_string()
 }
 
 fn kill_helper() {

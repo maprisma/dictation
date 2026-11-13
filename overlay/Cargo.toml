@@ -23,6 +23,9 @@ libc = "0.2"
 # Already in the dependency tree (libcosmic): F12 screenshots (PNG).
 png = "0.18"
 
+[dev-dependencies]
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
+
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic"
 # The revision COSMIC's own applets (cosmic-applets 1.11) are built against, like the other Maprisma apps.

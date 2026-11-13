@@ -3248,6 +3248,7 @@ dependencies = [
  "libcosmic",
  "maprisma-voice",
  "png 0.18.1",
+ "regex",
  "serde_json",
  "tokio",
  "zbus",
