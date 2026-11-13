@@ -10,6 +10,7 @@
 //! | `listen` | `true` | start listening when the overlay opens |
 //! | `end` | `silence` | how a tapped (toggle) session ends: `silence` or `release` |
 //! | `screenshot_key` | `true` | F12 saves a picture of the overlay to ~/Pictures/Maprisma Dictation/ |
+//! | `keyboard` | `on_demand` | layer-shell keyboard mode: `on_demand`, or `exclusive` for a compositor that doesn't focus the overlay |
 
 use serde_json::Value;
 
@@ -23,6 +24,7 @@ pub struct Settings {
     pub listen: bool,
     pub end_silence: bool,
     pub screenshot_key: bool,
+    pub keyboard_exclusive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +36,7 @@ pub enum Motion {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { language: "system".into(), corners: "desktop".into(), motion: Motion::Desktop, listen: true, end_silence: true, screenshot_key: true }
+        Settings { language: "system".into(), corners: "desktop".into(), motion: Motion::Desktop, listen: true, end_silence: true, screenshot_key: true, keyboard_exclusive: false }
     }
 }
 
@@ -62,6 +64,7 @@ pub fn parse(bytes: &[u8]) -> Settings {
     if let Some(b) = map.get("screenshot_key").and_then(Value::as_bool) {
         s.screenshot_key = b;
     }
+    s.keyboard_exclusive = text("keyboard") == Some("exclusive");
     s
 }
 
@@ -139,8 +142,8 @@ mod tests {
     fn defaults_and_broken_values() {
         assert_eq!(parse(b""), Settings::default());
         assert_eq!(parse(b"[1]"), Settings::default());
-        let s = parse(br#"{"language": "de", "corners": "square", "motion": "reduced", "listen": false, "end": "release", "screenshot_key": false, "other": 1}"#);
-        assert_eq!(s, Settings { language: "de".into(), corners: "square".into(), motion: Motion::Reduced, listen: false, end_silence: false, screenshot_key: false });
+        let s = parse(br#"{"language": "de", "corners": "square", "motion": "reduced", "listen": false, "end": "release", "screenshot_key": false, "keyboard": "exclusive", "other": 1}"#);
+        assert_eq!(s, Settings { language: "de".into(), corners: "square".into(), motion: Motion::Reduced, listen: false, end_silence: false, screenshot_key: false, keyboard_exclusive: true });
         let s = parse(br#"{"language": "xx", "corners": "bogus", "motion": 3, "listen": "no"}"#);
         assert_eq!(s, Settings::default());
     }

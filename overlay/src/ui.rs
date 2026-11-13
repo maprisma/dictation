@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 pub const APP_ID: &str = "com.maprisma.Dictation";
 // F12 pictures go to ~/Pictures/<this>/ (the app's name, the same in every language).
 const SHOT_FOLDER: &str = "Maprisma Dictation";
+static DEBUG: LazyLock<bool> = LazyLock::new(|| std::env::var_os("MAPRISMA_DICTATION_DEBUG").is_some());
 static INPUT_ID: LazyLock<cosmic::widget::Id> = LazyLock::new(|| cosmic::widget::Id::new("dictation-input"));
 
 /// The pill: compact, and at most this big.
@@ -164,7 +165,7 @@ impl Overlay {
         SctkLayerSurfaceSettings {
             id,
             layer: Layer::Overlay,
-            keyboard_interactivity: KeyboardInteractivity::OnDemand,
+            keyboard_interactivity: if self.settings.keyboard_exclusive { KeyboardInteractivity::Exclusive } else { KeyboardInteractivity::OnDemand },
             anchor: Anchor::TOP,
             namespace: "maprisma-dictation".into(),
             margin: IcedMargin { top: (TOP - MARGIN) as i32, ..Default::default() },
@@ -859,6 +860,13 @@ impl cosmic::Application for Overlay {
                         Key::Character(c) if modifiers.control() && !modifiers.shift() && c.eq_ignore_ascii_case("m") => Some(Message::ToggleMic),
                         _ => None,
                     }
+                }
+                cosmic::iced::Event::PlatformSpecific(cosmic::iced::event::PlatformSpecific::Wayland(WaylandEvent::Layer(event, _, id))) => {
+                    // MAPRISMA_DICTATION_DEBUG=1: keyboard focus of the layer surfaces, for checking a compositor.
+                    if *DEBUG {
+                        eprintln!("maprisma-dictation: layer {id:?} {event:?}");
+                    }
+                    None
                 }
                 cosmic::iced::Event::PlatformSpecific(cosmic::iced::event::PlatformSpecific::Wayland(WaylandEvent::Output(OutputEvent::Created(Some(info)), output))) => {
                     Some(Message::Output(info.name.clone().unwrap_or_default(), output))
