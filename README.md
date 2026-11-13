@@ -2,19 +2,24 @@
 
 One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hyprland/Omarchy.
 
-- **`maprisma-voice`** (this step) is a small user service on the session D-Bus (`com.maprisma.Voice1`).
+- **`maprisma-voice`** is a small user service on the session D-Bus (`com.maprisma.Voice1`).
   - It records the microphone while an app asks, notices when you stop talking and turns the speech into text.
   - It runs on your own PC by default: whisper.cpp with Vulkan, keeping the model loaded in memory. Online engines and external dictation apps can be used instead.
+- **`maprisma-dictation`** is the overlay: a pill at the top centre with an aura ring. Speak or type
+  a question and the AI helper you chose in Maprisma Manager → AI answers. Bind a key to
+  `maprisma-dictation --toggle` (details, hold-to-talk and the key per desktop: [docs/overlay.md](docs/overlay.md)).
+  It answers only for now; acting on the desktop is the next step.
 - **Coming next:**
   - the Voice settings in Maprisma Manager;
   - a mic button on every Ask AI page;
-  - the dictation overlay: speak or type, and the AI helper does it.
+  - desktop actions for the overlay (`maprisma-actions`).
   - See [docs/plan.md](docs/plan.md) and [docs/proposal.md](docs/proposal.md).
 
 ## Install
 
 ```sh
-./install.sh            # ~/.local/bin/maprisma-voice + systemd user unit + D-Bus activation
+./install.sh            # ~/.local/bin/maprisma-voice + systemd user unit + D-Bus activation,
+                        # ~/.local/bin/maprisma-dictation + its (hidden) launcher entry and icons
 ./install.sh --uninstall
 ```
 
@@ -56,6 +61,11 @@ maprisma-voice set language de      # settings: enabled, engine, model, language
 
 Apps use the D-Bus API: [docs/protocol.md](docs/protocol.md).
 
+```sh
+maprisma-dictation --toggle         # the overlay: listen, then ask the AI helper (again: close)
+maprisma-dictation --demo           # try the look: made-up speech and answer
+```
+
 Measured on an RX 7900 XTX with large-v3-turbo, a 5.5 s sentence takes about 0.25–0.4 s, in German and English. The model takes about 850 MB of GPU memory and is unloaded after 10 idle minutes (`unload_minutes`).
 
 ## Privacy
@@ -65,7 +75,7 @@ Measured on an RX 7900 XTX with large-v3-turbo, a 5.5 s sentence takes about 0.2
 ## Development
 
 ```sh
-cargo test                    # headless: fake recorder, fake whisper-server, private bus
+cargo test --workspace        # headless: fake recorder, fake whisper-server, private bus; the overlay's logic
 tools/gen-translations        # after editing translations/*.json (en, de, fr, es, it, pt, nl, pl)
 ```
 
