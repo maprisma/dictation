@@ -274,8 +274,9 @@ mod tests {
         format!("[Desktop Entry]\nType=Application\nName={name}\nExec=x\n{extra}\n[Desktop Action new]\nName=Other\n")
     }
 
-    fn fake() -> (PathBuf, Vec<(PathBuf, bool)>) {
-        let root = crate::paths::test_roots().join(format!("apps-{}", std::process::id()));
+    /// Each test its own folders (tests run in parallel).
+    fn fake(name: &str) -> (PathBuf, Vec<(PathBuf, bool)>) {
+        let root = crate::paths::test_roots().join(format!("apps-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         let user = root.join("home/applications");
         let sys = root.join("usr/applications");
@@ -301,7 +302,7 @@ mod tests {
         assert_eq!(dirs[0].0, PathBuf::from("/h/.local/share/applications"));
         assert!(dirs.iter().any(|(d, s)| d == Path::new("/usr/share/applications") && *s));
         assert!(dirs.iter().any(|(d, s)| d.ends_with("flatpak/exports/share/applications") && !*s));
-        let (_root, dirs) = fake();
+        let (_root, dirs) = fake("scan");
         let apps = scan(&dirs, "de", "Hyprland");
         let names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
         assert!(names.contains(&"Firefox Browser"), "{names:?}");
@@ -313,7 +314,7 @@ mod tests {
 
     #[test]
     fn resolving_names() {
-        let (_root, dirs) = fake();
+        let (_root, dirs) = fake("resolve");
         let apps = scan(&dirs, "", "Hyprland");
         let one = |q: &str| match resolve(&apps, q) {
             Found::One(a) => a.name,
