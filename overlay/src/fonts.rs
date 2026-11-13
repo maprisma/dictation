@@ -73,6 +73,11 @@ fn installed(family: &str) -> bool {
     output(&["fc-list", family, "family"]).is_some_and(|o| !o.trim().is_empty())
 }
 
+/// Plasma's kdeglobals, under `$XDG_CONFIG_HOME` like the palette's.
+fn kdeglobals_path() -> std::path::PathBuf {
+    crate::paths::config_root().join("kdeglobals")
+}
+
 /// The desktop's interface font family, when it isn't libcosmic's own (COSMIC: None).
 pub fn desktop_family(desktop: Desktop) -> Option<String> {
     if cfg!(test) {
@@ -80,7 +85,7 @@ pub fn desktop_family(desktop: Desktop) -> Option<String> {
     }
     let family = match desktop {
         Desktop::Hyprland => from_gsettings(&output(&["gsettings", "get", "org.gnome.desktop.interface", "font-name"])?),
-        Desktop::Kde => from_kdeglobals(&std::fs::read_to_string(crate::paths::home().join(".config/kdeglobals")).ok()?),
+        Desktop::Kde => from_kdeglobals(&std::fs::read_to_string(kdeglobals_path()).ok()?),
         _ => None,
     }?;
     installed(&family).then_some(family)
@@ -119,6 +124,8 @@ mod tests {
         let kde = "[Colors:View]\nfont=Wrong,9\n[General]\nColorScheme=X\nfont=Noto Sans,10,-1,5,400,0,0,0,0,0\nfixed=Hack,10\n";
         assert_eq!(from_kdeglobals(kde).as_deref(), Some("Noto Sans"));
         assert_eq!(from_kdeglobals("[General]\nfixed=Hack,10\n"), None);
+        // The same kdeglobals as the palette: under the config root, not always ~/.config.
+        assert_eq!(kdeglobals_path(), crate::paths::config_root().join("kdeglobals"));
         assert_eq!(desktop_family(Desktop::Hyprland), None, "tests never read the session");
     }
 }
