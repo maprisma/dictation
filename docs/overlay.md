@@ -12,7 +12,19 @@ maprisma-dictation --hold      # hold-to-talk: bind to a key press …
 maprisma-dictation --release   # … and this to the same key's release
 maprisma-dictation --demo      # made-up voice levels, speech and answer: try the look without a mic or helper
 maprisma-dictation --ask "open Firefox"   # open without listening and ask this at once, as if typed
+maprisma-dictation --wake [--ask-rest TEXT]   # started by maprisma-voice when it heard the wake phrase
 ```
+
+### The wake phrase (`--wake`)
+With maprisma-voice's `wake_enabled` on, saying the phrase ("Hey Linux", set in Maprisma Manager's
+Voice page or `maprisma-voice set wake_phrase …`, see [protocol.md](protocol.md#the-wake-phrase))
+starts `maprisma-dictation --wake`:
+
+- it opens and listens at once, ending on silence (whatever `listen` and `end` say: there is no key to release);
+- with `--ask-rest TEXT` (what was said right after the phrase: "Hey Linux, open Firefox") it asks TEXT at once instead, as if typed;
+- if the overlay is already open, it never closes (unlike `--toggle`): the open one gets `Wake(rest)` on
+  `com.maprisma.Dictation` and listens again, or asks `rest`; while it listens, transcribes or waits for
+  an answer, nothing happens. A spoken answer or a waiting card goes, as with Ctrl+M.
 
 ## Using it
 
@@ -232,9 +244,10 @@ by itself. The icon shows, from the session bus only (nothing is started for it)
 | filled mic (`-open-symbolic`) | the overlay is open (`com.maprisma.Dictation` has an owner) |
 | filled mic with sound arcs (`-listening-symbolic`) | maprisma-voice listens or transcribes (`State` signal; any app's session: the mic is on) |
 | filled mic with a dot (`-speaking-symbolic`) | an answer is read aloud (`Speaking`) |
+| mic outline with a ring (`-wake-symbolic`) | the wake listener has the microphone open, waiting for the wake phrase (`WakeListening`, `Status` → `wake_active`); the tooltip says "Listening for the wake phrase." |
 
 `Status` is asked only when the voice service already runs: at the start, when it appears, and
-every 15 s while the icon shows it busy. `Level` and `Partial` are not subscribed. The texts follow
+every 15 s while the icon shows it busy or waiting for the wake phrase. `Level` and `Partial` are not subscribed. The texts follow
 the overlay's `language` setting (re-read every 5 s).
 
 Checked live on Hyprland (4K, 2026-11-13) from a temporary prefix, the overlay on a headless

@@ -8,7 +8,7 @@
 | Interface | `com.maprisma.Voice1` |
 | Errors | `com.maprisma.Voice1.Error.{Disabled, NotReady, InvalidArgs, UnknownSession, NotSupported, EngineFailed, RecorderFailed, Failed}`; the message is meant to be shown to people, in the service's language. |
 
-Only the daemon opens the microphone, and only while a session is `listening`. One session listens at a time.
+Only the daemon opens the microphone: while a session is `listening`, and, when the wake phrase is on, while it waits for it ([The wake phrase](#the-wake-phrase)). One session listens at a time.
 
 ## Methods
 
@@ -22,6 +22,7 @@ Only the daemon opens the microphone, and only while a session is `listening`. O
     - Both modes stop at 60 s with `max_length`. This also holds by the wall clock (60 s + 5 s), even when the recorder delivers audio slowly.
     - A recorder that delivers nothing for 5 s has stalled: listening ends (`recorder_stalled`), with what was heard so far, or `RecorderFailed` when nothing came.
   - `language`: `auto` or a Whisper code (`de`, `en`, …). It overrides the setting for this session.
+- The wake listener steps back first: it closes the microphone before the session opens it (at most 20 s, else `EngineFailed`), and waits until 1 s after the session closed.
 - A running session is **preempted**: it gets `Final` with what it heard so far, then `Closed("preempted")`. The new session only starts once the old one has let go of the microphone (or its external engine has stopped). If that takes longer than 20 s, or the external stop fails, `StartSession` fails with `EngineFailed`; two recordings never overlap.
 - When the daemon stops (SIGTERM, SIGINT, the bus going away), it first cancels every session and waits for them (at most 35 s), so an external recorder never goes on after it. They close with `shutdown`.
 - If the calling client leaves the bus, its session is cancelled (`client_gone`).
@@ -40,6 +41,8 @@ Stop without text (`Closed("cancelled")`). If an external engine's cancel fails,
 - The local engine: `whisper_server`, `server_running`, `server_port`.
 - Also: `typed_by_engine`, `online_provider`, `sessions`, `version`.
 - Spoken answers: `speech_ready`, `speech_why_not`, `speech_message`, `speaking`.
+- The wake phrase: `wake_enabled`, `wake_active` (the microphone is open, waiting for the phrase), `wake_phrase`, `wake_why_not` and `wake_message` (a code and its text: why it isn't listening now).
+- `wake_why_not` codes: `""` (listening), `off`, `disabled` (dictation is off), `busy` (a session runs, or ended less than 1 s ago), `speaking`, `cooldown` (heard less than 3 s ago), `no_whisper_server`, `no_model`, `no_recorder`, `recorder_failed`, `failed`.
 - `why_not` codes: `disabled`, `no_engine`, `no_whisper_server`, `no_model`, `no_online_key`, `no_voxtype`, `no_superwhisper`, `no_omarchy`, `no_recorder`.
 
 ### `Speak(s text, a{sv} options) → s speak_id`
@@ -55,7 +58,13 @@ Stop without text (`Closed("cancelled")`). If an external engine's cancel fails,
 ### `StopSpeaking()`
 Stops the voice at once.
 
-## Signals (all carry the `session_id` first)
+### `WakeTest(u seconds) → a{sv}`
+For "Try the phrase" buttons: listens once (1–10 s) for one stretch of speech, with the wake recogniser, and says what it heard. Nothing is started on a match and no `Wake` is sent. It works with `wake_enabled` off too (the recogniser is unloaded again afterwards).
+- The answer: `heard` (s, the recogniser's text), `matched` (b), `score` (d, 0…1, 1 = exactly the phrase), `needed` (d, the score a match needs at this sensitivity), `rest` (s, what came after the phrase), `phrase` (s), `model` (s), `speech` (b: false when only quiet came within the time).
+- It claims the microphone like a session (the wake listener pauses); it is refused while a session runs, and a session that starts meanwhile ends it with an error.
+- Errors: `InvalidArgs` (seconds), `NotReady` (with why: no whisper-server, model or recorder), `Failed` (busy).
+
+## Signals (the session signals carry the `session_id` first)
 
 | Signal | Arguments | When |
 |---|---|---|
@@ -65,6 +74,8 @@ Stops the voice at once.
 | `Final` | `s text`, `a{sv} details` | once at the end. `details`: `typed` (b: an external engine typed the text itself, so `text` is empty), `engine`, `model`, `language`, `audio_ms`, `elapsed_ms` |
 | `Error` | `s code`, `s message` | before `Closed("error")` |
 | `Speaking` | `s speak_id`, `s state`, `s message` | `speaking`, then `done`, `stopped` or `error` (with a message); the first argument is the speak id, not a session |
+| `Wake` | `s phrase`, `s rest` | the wake phrase was heard (no session id); `rest` is what was said right after it in the same breath, or empty. The daemon then starts the overlay itself |
+| `WakeListening` | `b active` | the wake listener opened (true) or closed (false) the microphone; for bar icons |
 | `Closed` | `s reason` | always last: `finished`, `silence`, `max_length`, `no_speech`, `cancelled`, `preempted`, `client_gone`, `recorder_ended`, `recorder_stalled`, `shutdown` or `error` |
 
 ## Settings
@@ -81,6 +92,11 @@ Stops the voice at once.
 | `preload` | `false` | load the model when the daemon starts |
 | `unload_minutes` | `10` | stop whisper-server, freeing its GPU memory, after this many idle minutes; `0` never stops it (the Kokoro worker too) |
 | `kokoro_runtime` | `""` | the Narrator's runtime folder for spoken answers; empty means `~/.local/share/kindle-reader` |
+| `wake_enabled` | `false` | listen for the wake phrase while no session runs; the microphone then stays open ([below](#the-wake-phrase)) |
+| `wake_phrase` | `Hey Linux` | 2–40 characters: letters, digits, spaces and `,.!?'-`, at least two letters or digits, no spaces at the ends |
+| `wake_language` | `auto` | the language the wake recogniser listens for: `auto` or a Whisper code. Set it to the phrase's language when it is misheard |
+| `wake_model` | `""` | the wake recogniser's model (id or file); empty: the smallest installed one (tiny, then base, then small) |
+| `wake_sensitivity` | `normal` | `strict`, `normal` or `loose`: how far what was heard may be from the phrase (normalised edit distance 0.15, 0.25, 0.35; a match needs a score of 0.85, 0.75, 0.65) |
 | `ui_language` | `system` | the language of the messages: `en`, `de`, `fr`, `es`, `it`, `pt`, `nl` or `pl` |
 
 The CLI writes them with `maprisma-voice set KEY VALUE` and `unset KEY`, which checks each value.
@@ -95,6 +111,17 @@ The CLI writes them with `maprisma-voice set KEY VALUE` and `unset KEY`, which c
   - The key comes from `OPENAI_API_KEY` or `GROQ_API_KEY`, or from `~/.codex/.env`.
   - It is passed to curl on stdin, never on the command line.
 - **external:** `voxtype record start|stop`, `superwhisper start|stop` or `omarchy-dictation start|stop`. These type the text into the focused window themselves, so `Final` has `typed=true` and empty text.
+
+## The wake phrase
+With `wake_enabled` on, the daemon listens for the phrase (for example "Hey Linux") and opens Maprisma Dictation when it hears it.
+
+- **When it listens:** dictation is enabled, no session runs (or ended less than 1 s ago), no answer is read aloud, and the phrase wasn't heard in the last 3 s. Any app's `StartSession` (also the Omarchy adapter's) makes it close the microphone first. A change of the wake settings or the microphone restarts it within half a second.
+- **How:** it records with the usual recorder, cuts stretches of speech of 0.4–3 s with the energy detector (0.6 s of quiet ends one; longer talk is checked on its first 3 s only), and turns each one into text **locally**: a small Whisper model on a second whisper-server of its own, CPU only (`-ng -t 4`), so the main GPU server is not touched. Online and external engines are never used for it.
+- **Matching:** both texts are normalised (lowercase, accents folded, punctuation dropped) and compared word by word with the edit distance, also on a light sound folding (`igh`, `ey`, `ei`, `ay` → `ai`: "High Linux" and "Hei Linux" match "Hey Linux"). The phrase must be at the start (one word before it is allowed). What follows it is the request: "Hey Linux, open Firefox" → `rest` = `open Firefox`.
+- **On a match:** `Wake(phrase, rest)`, then `maprisma-dictation --wake` (with `--ask-rest REST` when something followed the phrase in a stretch under 3 s) from `~/.local/bin` or PATH, as its own process (no shell). The overlay needs the desktop's environment (`WAYLAND_DISPLAY`) in the daemon's: the systemd user manager has it on COSMIC, KDE and Hyprland when the session imports it.
+- **Memory:** the wake whisper-server stays loaded while the wake phrase is on (about 200 MB of RAM with ggml-base) and is stopped when it is turned off; `unload_minutes` doesn't apply to it.
+- **Privacy:** while it is on, **the microphone stays open** (the bar icon shows a mic outline with a ring). Audio stays in memory; each stretch is dropped right after it was compared. Nothing is logged but "wake phrase heard".
+- **CLI:** `maprisma-voice wake test [--seconds N] [--json]` runs `WakeTest` (N ≤ 10, default 10): it prints what was heard, the score and whether it matches (`--json`: the answer as one object). Exit codes: 0 it matches, 1 it doesn't or failed, 3 no speech, 4 the service is missing. `maprisma-voice set wake_phrase "Hallo Rechner"` and the other keys are checked like every setting.
 
 ## For apps: `maprisma-voice dictate --events`
 Apps that would rather not speak D-Bus themselves (Flutter, QML) run the CLI. Every Maprisma mic button uses this.

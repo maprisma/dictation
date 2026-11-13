@@ -11,7 +11,8 @@ One voice service for every Maprisma app. It runs on COSMIC, KDE Plasma and Hypr
   It can also act: open apps and web pages, switch workspaces, light/dark, do not disturb,
   volume and media, and show the weather; closing windows and commands wait for Enter, and
   sudo, packages, deleting and secrets are never done ([Actions](docs/overlay.md#actions)).
-  It can read answers aloud (`speak_answers`).
+  It can read answers aloud (`speak_answers`). Optionally it opens when you say a **wake phrase**
+  such as "Hey Linux" (`wake_enabled`, off by default; recognised locally, [docs/protocol.md](docs/protocol.md#the-wake-phrase)).
 - **The bar icon** toggles the overlay on every desktop ([docs/overlay.md](docs/overlay.md#the-bar-icon)):
   a COSMIC panel applet (`maprisma-dictation-applet`) and a tray icon on KDE Plasma and Hyprland
   (`maprisma-dictation-tray`). It shows when the microphone listens or an answer is read aloud.
@@ -66,6 +67,9 @@ maprisma-voice status               # engine, model and why it isn't ready
 maprisma-voice speak "Hallo!"       # read aloud with Kokoro (the Narrator's voice), if installed
 maprisma-voice omarchy toggle       # Omarchy's dictation keys: see docs/omarchy.md
 maprisma-voice set language de      # settings: enabled, engine, model, language, microphone, …
+maprisma-voice set wake_enabled true   # open Maprisma Dictation by saying "Hey Linux"
+maprisma-voice set wake_phrase "Hallo Rechner"
+maprisma-voice wake test            # say it once: what the wake recogniser heard, and the score
 ```
 
 Apps use the D-Bus API: [docs/protocol.md](docs/protocol.md).
@@ -81,11 +85,14 @@ Measured on an RX 7900 XTX with large-v3-turbo, a 5.5 s sentence takes about 0.2
 ## Privacy
 - Audio stays in memory. A file is written only when an engine needs one: online engines get a 0600 file in a private runtime folder, deleted straight away.
 - The microphone is open only while a session is listening. If an app quits during a session, its session is cancelled.
+- Exception: with the wake phrase on (`wake_enabled`, off by default) the microphone stays open while nothing else uses it, and the bar icon shows it. What it hears is checked locally, a few seconds at a time, and dropped right away; it never goes online.
 
 ## Development
 
 ```sh
 cargo test --workspace        # headless: fake recorder, fake whisper-server, private bus; the overlay's logic
+dbus-run-session -- cargo test -p maprisma-voice --test wake_bus -- --ignored
+                              # the wake phrase end to end: the real daemon, a Kokoro recording, ggml-base
 tools/gen-translations        # after editing translations/*.json (en, de, fr, es, it, pt, nl, pl)
 ```
 
