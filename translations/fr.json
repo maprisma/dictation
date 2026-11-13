@@ -34,6 +34,7 @@
  "Enter asks · Ctrl+Shift+C copies · Esc closes": "Entrée demande · Ctrl+Maj+C copie · Échap ferme",
  "Enter runs · Esc cancels": "Entrée exécute · Échap annule",
  "Enter sends · Ctrl+M talks · Esc closes": "Entrée envoie · Ctrl+M parle · Échap ferme",
+ "Esc stops reading aloud": "Échap arrête la lecture à voix haute",
  "Feels like {0}": "Ressenti {0}",
  "Fog": "Brouillard",
  "Freezing rain": "Pluie verglaçante",

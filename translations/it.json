@@ -34,6 +34,7 @@
  "Enter asks · Ctrl+Shift+C copies · Esc closes": "Invio chiede · Ctrl+Maiusc+C copia · Esc chiude",
  "Enter runs · Esc cancels": "Invio esegue · Esc annulla",
  "Enter sends · Ctrl+M talks · Esc closes": "Invio invia · Ctrl+M parla · Esc chiude",
+ "Esc stops reading aloud": "Esc interrompe la lettura ad alta voce",
  "Feels like {0}": "Percepita {0}",
  "Fog": "Nebbia",
  "Freezing rain": "Pioggia gelata",

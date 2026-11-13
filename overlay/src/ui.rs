@@ -691,6 +691,8 @@ impl Overlay {
         let left = self.status.clone().unwrap_or_else(|| self.helper_name.clone());
         let hints = if self.machine.confirming {
             tr("Enter runs · Esc cancels")
+        } else if self.machine.speaking {
+            tr("Esc stops reading aloud")
         } else if self.machine.answer.is_empty() {
             tr("Enter sends · Ctrl+M talks · Esc closes")
         } else if self.turn.undoable().is_some() {
