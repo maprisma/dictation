@@ -13,6 +13,15 @@ path = "src/lib.rs"
 name = "maprisma-dictation"
 path = "src/main.rs"
 
+# The bar icon that toggles the overlay: COSMIC panel applet, and the tray for KDE and Hyprland.
+[[bin]]
+name = "maprisma-dictation-applet"
+path = "src/applet/main.rs"
+
+[[bin]]
+name = "maprisma-dictation-tray"
+path = "src/tray/main.rs"
+
 [dependencies]
 maprisma-voice = { path = ".." }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
@@ -31,4 +40,4 @@ git = "https://github.com/pop-os/libcosmic"
 # The revision COSMIC's own applets (cosmic-applets 1.11) are built against, like the other Maprisma apps.
 rev = "95236a944bfd51c63a2fc65fe50a592c47168d40"
 default-features = false
-features = ["dbus-config", "multi-window", "tokio", "wayland", "winit"]
+features = ["applet", "applet-token", "dbus-config", "multi-window", "tokio", "wayland", "winit"]

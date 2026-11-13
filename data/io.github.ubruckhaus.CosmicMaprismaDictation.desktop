@@ -1,0 +1,27 @@
+[Desktop Entry]
+Name=Maprisma Dictation
+Comment=Click to open or close the dictation overlay; right click for its menu
+Type=Application
+Exec=maprisma-dictation-applet
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Dictation;Voice;Assistant;Maprisma;
+Icon=io.github.ubruckhaus.CosmicMaprismaDictation-symbolic
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true
+X-OverflowPriority=10
+Name[de]=Maprisma Diktieren
+Comment[de]=Klicken öffnet oder schließt das Diktierfenster; Rechtsklick für sein Menü
+Name[fr]=Maprisma Dictée
+Comment[fr]=Cliquer ouvre ou ferme la fenêtre de dictée ; clic droit pour son menu
+Name[es]=Maprisma Dictado
+Comment[es]=Haz clic para abrir o cerrar la ventana de dictado; clic derecho para su menú
+Name[it]=Maprisma Dettatura
+Comment[it]=Clic per aprire o chiudere la finestra di dettatura; clic destro per il suo menu
+Name[pt]=Maprisma Ditado
+Comment[pt]=Clique para abrir ou fechar a janela de ditado; clique direito para o seu menu
+Name[nl]=Maprisma Dicteren
+Comment[nl]=Klik om het dicteervenster te openen of te sluiten; rechtsklik voor het menu
+Name[pl]=Maprisma Dyktowanie
+Comment[pl]=Kliknij, aby otworzyć lub zamknąć okno dyktowania; prawy przycisk otwiera menu

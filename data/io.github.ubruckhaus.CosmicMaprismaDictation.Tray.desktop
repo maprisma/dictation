@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Maprisma Dictation tray
+Name[de]=Maprisma Diktieren im Systembereich
+Name[fr]=Icône de notification Maprisma Dictée
+Name[es]=Bandeja de Maprisma Dictado
+Name[it]=Area di notifica di Maprisma Dettatura
+Name[pt]=Bandeja do Maprisma Ditado
+Name[nl]=Maprisma Dicteren in het systeemvak
+Name[pl]=Zasobnik Maprisma Dyktowanie
+Exec=maprisma-dictation-tray
+Icon=io.github.ubruckhaus.CosmicMaprismaDictation-symbolic
+Terminal=false
+OnlyShowIn=KDE;Hyprland;

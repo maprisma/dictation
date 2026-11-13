@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod aura;
+pub mod bar;
 pub mod corners;
 pub mod helper;
 pub mod instance;
@@ -32,7 +33,7 @@ mod tests {
         let either = regex::Regex::new(r#"trf\(if \w+ \{ "([^"]+)" \} else \{ "([^"]+)" \}"#).unwrap();
         let why = regex::Regex::new(r#"pub const WHY_\w+: &str = "([^"]+)""#).unwrap();
         let mut keys = vec![];
-        for file in ["src/ui.rs", "src/helper.rs", "src/voice.rs", "src/state.rs", "src/actions/mod.rs", "src/actions/exec.rs", "src/actions/policy.rs"] {
+        for file in ["src/ui.rs", "src/helper.rs", "src/voice.rs", "src/state.rs", "src/actions/mod.rs", "src/actions/exec.rs", "src/actions/policy.rs", "src/bar.rs", "src/tray/main.rs", "src/applet/main.rs"] {
             let text = std::fs::read_to_string(file).unwrap();
             for cap in re.captures_iter(&text).chain(note.captures_iter(&text)).chain(why.captures_iter(&text)) {
                 keys.push((file, cap[1].to_string()));
