@@ -44,7 +44,7 @@ impl Recorder {
         let mic = (microphone != "default" && crate::settings::valid_microphone(microphone)).then_some(microphone);
         let mut args: Vec<String> = match self {
             Recorder::PwRecord(_) => {
-                let mut a: Vec<String> = ["--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "--latency", "50ms", "-P", "media.name=Maprisma Voice"].map(String::from).to_vec();
+                let mut a: Vec<String> = ["--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "--latency", "50ms", "-P", "{ media.name = \"Maprisma Voice\" }"].map(String::from).to_vec();
                 if let Some(m) = mic {
                     a.extend(["--target".into(), m.into()]);
                 }
@@ -141,6 +141,16 @@ pub fn start(recorder: &Recorder, microphone: &str) -> std::io::Result<Capture> 
 
 #[cfg(test)]
 mod tests {
+
+    /// pw-record parses -P as SPA-JSON: a bare `key=value with spaces` makes it exit at once
+    /// (the bug of 2026-11-13: no audio from the installed service).
+    #[test]
+    fn pw_record_properties_are_an_object() {
+        let args = Recorder::PwRecord("/usr/bin/pw-record".into()).args("default");
+        let i = args.iter().position(|a| a == "-P").unwrap();
+        let props = args[i + 1].to_string_lossy();
+        assert!(props.starts_with('{') && props.ends_with('}') && props.contains("\"Maprisma Voice\""), "{props}");
+    }
     use super::*;
     use crate::paths::testdir::TestDir;
 
