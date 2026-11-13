@@ -22,13 +22,13 @@ Its settings live in a new **Maprisma Manager** category. The design draws on:
 | Omarchy 4.5 | `omarchy-dictation start/stop/toggle`, which runs the adapter `omarchy-dictation-<backend>`. The backend is Superwhisper (default) or Voxtype. Keys: Right Alt/F9 push-to-talk, Super+Ctrl+X toggle | we add an **adapter `omarchy-dictation-maprisma`** so Omarchy's keys can use our service |
 | Superwhisper (Linux since 2026-11-05) | Commercial app; pastes text into the active app; no API for recording or transcribing (its CLI only works with history, macOS/Windows) | **cannot be our engine**. It stays selectable as an external engine that types the text, as in Omarchy |
 | Voxtype | MIT, whisper.cpp/Parakeet, Vulkan; CLI and signals; no D-Bus | optional external engine (types the text) |
-| Narrator | Speech only (Kokoro/Piper), a resident worker | **becomes the voice of the overlay** (see Narrator) |
+| Narrator | Speech only (Kokoro/Piper), a resident worker | stays on its own; the service may use the installed Kokoro only for spoken answers (see Narrator) |
 | This PC | RX 7900 XTX (Vulkan), 7950X3D; pw-record and wtype present; **no STT engine or model installed** | first step: whisper.cpp with Vulkan plus one model |
 
 ## Architecture
 
 ```
- Ask AI pages (Launcher, Theme, Manager, Playground, Maprisma)   Narrator    Omarchy keys
+ Ask AI pages (Launcher, Theme, Manager, Playground, Maprisma)   Omarchy keys
         │ mic button                                                │            │ omarchy-dictation-maprisma
         ▼                                                           ▼            ▼
    D-Bus  com.maprisma.Voice1  ── maprisma-voice daemon (Rust, user systemd service) ──┐
