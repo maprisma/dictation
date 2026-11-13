@@ -3,9 +3,11 @@
 //! answer, with the aura ring around the pill.
 
 pub mod actions;
+pub mod answer;
 pub mod aura;
 pub mod bar;
 pub mod corners;
+pub mod fonts;
 pub mod helper;
 pub mod instance;
 pub mod last;

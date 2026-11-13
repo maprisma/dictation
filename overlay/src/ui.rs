@@ -5,6 +5,7 @@
 
 use crate::actions::exec::{self, Outcome, Target};
 use crate::actions::{self, State as ItemState, Turn, policy, schema};
+use crate::answer::{self, AutoClose, View};
 use crate::aura::{self, AuraColors, Envelope, Tone};
 use crate::helper::{self, Exchange};
 use crate::instance::Command;
@@ -12,13 +13,13 @@ use crate::markdown::{self, Block};
 use crate::settings::{self, Settings};
 use crate::state::{Effect, End, Event, Machine, Phase};
 use crate::voice::{self, Control, Controls, SpeakEvent, VoiceEvent};
-use crate::{corners, look, shot};
+use crate::{corners, fonts, look, shot};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::wayland::{Event as WaylandEvent, OutputEvent};
 use cosmic::iced::platform_specific::runtime::wayland::layer_surface::{IcedMargin, IcedOutput, SctkLayerSurfaceSettings};
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
-    Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface, set_input_zone,
+    Anchor, KeyboardInteractivity, Layer, destroy_layer_surface, get_layer_surface, set_input_zone, set_size,
 };
 use cosmic::iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use cosmic::iced::widget::{container as iced_container, text as iced_text};
@@ -45,6 +46,8 @@ pub const MARGIN: f32 = 24.0;
 /// The pill's top edge sits this far below the top of the screen (or under a panel).
 pub const TOP: f32 = 48.0;
 const SURFACE: (f32, f32) = (EXPANDED_WIDTH + 2.0 * MARGIN, MAX_HEIGHT + 2.0 * MARGIN);
+/// A chip's height with its gap (the height estimate before the body is measured).
+const CHIP: f32 = 38.0;
 /// Space for the state dot left of the field.
 const LEAD: f32 = 40.0;
 
@@ -65,7 +68,16 @@ pub struct Flags {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Output(String, WlOutput),
+    /// An output was announced (its name, logical size).
+    Output(String, Option<(f32, f32)>, WlOutput),
+    /// An output's size became known or changed.
+    OutputInfo(String, Option<(f32, f32)>),
+    /// The chips of a command were shown long enough: close (the auto-close's generation).
+    AutoClose(u64),
+    /// A key press the overlay has no use for (it still keeps an auto-close from happening).
+    Activity,
+    /// The pointer came over the pill (keeps it open).
+    PointerIn,
     OpenFallback,
     Command(Command),
     Voice(u64, VoiceEvent),
@@ -151,6 +163,26 @@ pub struct Overlay {
     speak_gen: u64,
     speak: Option<(String, String)>,
     speaking_since: Option<Instant>,
+    // how the answer shows (answer.rs)
+    view: View,
+    /// The outputs' names and logical sizes (for the reading view's size).
+    outputs: Vec<(String, (f32, f32))>,
+    /// The reading view's width and largest height on this output.
+    reading: (f32, f32),
+    /// The layer surface's size now (it grows for the reading view, never shrinks).
+    surface_size: (f32, f32),
+    /// A command's auto-close: when it was armed, how long, whether something can be undone.
+    closing: Option<Closing>,
+    close_gen: u64,
+    /// A key, the pointer or typing kept this answer open.
+    close_kept: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Closing {
+    since: Instant,
+    millis: u64,
+    undo: bool,
 }
 
 fn rgb(c: Color) -> aura::Rgb {
@@ -181,9 +213,11 @@ fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: 
     })
 }
 
-/// The answer's height in the pill (a rough line count; the body scrolls when it is more).
-pub fn estimate_height(blocks: &[Block], question: bool, width: f32) -> f32 {
-    let per_line = ((width - 2.0 * 16.0) / 7.4).max(20.0) as usize;
+/// The answer's height in the pill (a rough line count; the body scrolls when it is more), at
+/// most `max`; `reading`: the reading view's larger type.
+pub fn estimate_height(blocks: &[Block], question: bool, width: f32, max: f32, reading: bool) -> f32 {
+    let (char_width, line) = if reading { (7.9, 23.0) } else { (7.4, 20.5) };
+    let per_line = ((width - 2.0 * if reading { 24.0 } else { 16.0 }) / char_width).max(20.0) as usize;
     let lines = |t: &str| t.lines().map(|l| l.chars().count().div_ceil(per_line).max(1)).sum::<usize>() as f32;
     let mut h = COMPACT.1 + 1.0 + 12.0; // the field, a divider, padding
     if question {
@@ -192,12 +226,12 @@ pub fn estimate_height(blocks: &[Block], question: bool, width: f32) -> f32 {
     for b in blocks {
         h += 8.0 + match b {
             Block::Heading(t) => 22.0 * lines(t),
-            Block::Paragraph(t) => 20.5 * lines(t),
-            Block::Item(_, t) => 20.5 * lines(t),
+            Block::Paragraph(t) => line * lines(t),
+            Block::Item(_, t) => line * lines(t),
             Block::Code(t) => 18.0 * t.lines().count().max(1) as f32 + 16.0,
         };
     }
-    (h + 12.0 + 26.0).clamp(COMPACT.1, MAX_HEIGHT) // the footer
+    (h + 12.0 + 26.0).clamp(COMPACT.1, max) // the footer
 }
 
 impl Overlay {
@@ -258,16 +292,29 @@ impl Overlay {
         if !expanded {
             return COMPACT;
         }
+        let (width, max) = self.view_size();
         // The field, divider, gap, body, footer: the body as measured once laid out.
         let chrome = COMPACT.1 + 1.0 + 10.0 + 4.0 + self.footer_height();
         let height = match (self.body_height, &m.phase) {
             (Some(body), _) => chrome + body,
             (None, Phase::Thinking) => chrome + 21.0,
             (None, Phase::Error(e)) => chrome + 21.0 + 22.0 * (e.chars().count() as f32 / 52.0).ceil().max(1.0),
-            (None, _) if !m.answer.is_empty() => estimate_height(&markdown::parse(&m.answer), !m.question.is_empty(), EXPANDED_WIDTH),
+            // Until measured: the text, and a chip's height for each action (cards are measured).
+            (None, _) if !m.answer.is_empty() => estimate_height(&markdown::parse(&self.shown), !m.question.is_empty(), width, max, self.view == View::Reading) + CHIP * self.turn.items.len() as f32,
             (None, _) => chrome + 21.0,
         };
-        (EXPANDED_WIDTH, height.min(MAX_HEIGHT))
+        (width, height.min(max))
+    }
+
+    /// The pill's width and largest height for the answer's view.
+    fn view_size(&self) -> (f32, f32) {
+        if self.view == View::Reading { self.reading } else { (EXPANDED_WIDTH, MAX_HEIGHT) }
+    }
+
+    /// The logical size of the output the overlay is on, when known.
+    fn output_size(&self) -> Option<(f32, f32)> {
+        let focused = if self.outputs.len() > 1 && self.output_wanted.is_none() && look::desktop() == look::Desktop::Hyprland { focused_hyprland_output() } else { None };
+        answer::pick_output(&self.outputs, self.output_wanted.as_deref(), focused.as_deref())
     }
 
     fn shows_footer(&self) -> bool {
@@ -296,15 +343,52 @@ impl Overlay {
         } else if !force {
             return Task::none();
         }
+        // The reading view needs a bigger surface: grow it once to the view's largest size. Square:
+        // libcosmic (95236a9) answers set_size with a configure of width × width (its height takes
+        // the width), and tiny-skia then panics on the buffer of the real, different size.
+        let mut grow = Task::none();
+        if target.0 + 2.0 * MARGIN > self.surface_size.0 + 0.5 || target.1 + 2.0 * MARGIN > self.surface_size.1 + 0.5 {
+            let (w, h) = self.view_size();
+            let side = self.surface_size.0.max(self.surface_size.1).max(w.max(target.0) + 2.0 * MARGIN).max(h.max(target.1) + 2.0 * MARGIN).ceil();
+            self.surface_size = (side, side);
+            if let Some(id) = self.surface {
+                grow = set_size(id, Some(self.surface_size.0.ceil() as u32), Some(self.surface_size.1.ceil() as u32));
+            }
+        }
         let (w, h) = (self.size_from.0.max(self.size_to.0), self.size_from.1.max(self.size_to.1));
-        let zone = Rectangle::new(Point::new((SURFACE.0 - w) / 2.0 - 6.0, MARGIN - 6.0), Size::new(w + 12.0, h + 12.0));
+        let zone = Rectangle::new(Point::new((self.surface_size.0 - w) / 2.0 - 6.0, MARGIN - 6.0), Size::new(w + 12.0, h + 12.0));
         if self.zone == Some(zone) {
-            return Task::none();
+            return grow;
         }
         self.zone = Some(zone);
         match self.surface {
-            Some(id) => set_input_zone(id, Some(vec![zone])),
-            None => Task::none(),
+            Some(id) => Task::batch([grow, set_input_zone(id, Some(vec![zone]))]),
+            None => grow,
+        }
+    }
+
+    /// Arms the auto-close once a command's actions all ran (answer.rs decides); anything else
+    /// that happens meanwhile (a key, the pointer, typing, a new question) disarms it.
+    fn check_auto_close(&mut self) -> Task<Message> {
+        if self.closing.is_some() || self.close_kept || self.machine.phase != Phase::Done {
+            return Task::none();
+        }
+        match answer::auto_close(self.view, &self.turn.items) {
+            AutoClose::After { millis, undo } => {
+                self.closing = Some(Closing { since: Instant::now(), millis, undo });
+                self.close_gen += 1;
+                let generation = self.close_gen;
+                Task::perform(tokio::time::sleep(Duration::from_millis(millis)), move |_| cosmic::Action::App(Message::AutoClose(generation)))
+            }
+            AutoClose::Pending | AutoClose::Stay => Task::none(),
+        }
+    }
+
+    /// The user did something: this answer stays open.
+    fn keep_open(&mut self) {
+        self.close_kept = true;
+        if self.closing.take().is_some() {
+            self.close_gen += 1;
         }
     }
 
@@ -422,6 +506,14 @@ impl Overlay {
         Task::batch(tasks)
     }
 
+    fn note_output(&mut self, name: String, size: Option<(f32, f32)>) {
+        let Some(size) = size else { return };
+        match self.outputs.iter_mut().find(|(n, _)| *n == name) {
+            Some(o) => o.1 = size,
+            None => self.outputs.push((name, size)),
+        }
+    }
+
     fn cancel_ask(&mut self) {
         self.ask_gen += 1;
         if let Some(handle) = self.ask.take() {
@@ -495,6 +587,9 @@ impl Overlay {
         self.turn_gen += 1;
         self.shown.clear();
         self.sync_card();
+        self.closing = None;
+        self.close_gen += 1;
+        self.close_kept = false;
     }
 
     /// Starts the next action (or shows its card).
@@ -507,7 +602,7 @@ impl Overlay {
         self.flush_log();
         self.sync_card();
         self.save_last();
-        Task::batch([task, self.update_zone(false), self.sync_catcher()])
+        Task::batch([task, self.update_zone(false), self.sync_catcher(), self.check_auto_close()])
     }
 
     fn execute(&self, i: usize) -> Task<Message> {
@@ -552,7 +647,9 @@ impl Overlay {
         if self.surface.is_none() {
             return false;
         }
-        let flashing = self.done_at.is_some_and(|t| t.elapsed().as_secs_f32() < aura::DONE_FLASH)
+        let counting = self.closing.is_some_and(|c| c.undo) && !self.reduced;
+        let flashing = counting
+            || self.done_at.is_some_and(|t| t.elapsed().as_secs_f32() < aura::DONE_FLASH)
             || self.error_at.is_some_and(|t| t.elapsed().as_secs_f32() < 0.6)
             || self.size_since.elapsed().as_secs_f32() < aura::MORPH;
         if self.reduced {
@@ -594,8 +691,14 @@ impl Overlay {
         let mut surface: Color = c.bg_color().into();
         // Opaque: text behind the pill must not show through the answer (Hyprland showed it at 92 %).
         surface.a = 1.0;
+        let countdown = match self.closing {
+            Some(c) if c.undo && !self.reduced => Some((1.0 - c.since.elapsed().as_secs_f32() * 1000.0 / c.millis as f32).clamp(0.0, 1.0)),
+            _ => None,
+        };
         AuraCanvas {
-            pill: Rectangle::new(Point::new((SURFACE.0 - w) / 2.0 + shake, MARGIN), Size::new(w, h)),
+            size: Size::new(w, h),
+            shake,
+            countdown,
             radius: radius.min(h / 2.0),
             colors: aura::aura_colors(accent, dark, tone),
             accent: aura::aura_colors(accent, dark, Tone::Accent),
@@ -671,9 +774,26 @@ impl Overlay {
             }
             _ => {}
         }
+        let reading = self.view == View::Reading;
         if !m.answer.is_empty() && m.phase != Phase::Thinking {
-            for block in markdown::parse(&self.shown) {
-                col = col.push(block_view(block));
+            let blocks = markdown::parse_raw(&self.shown);
+            if reading {
+                // Its own gaps (answer::gap_before), not the column's even 8 px.
+                let mut text_col = cosmic::iced::widget::Column::new().width(Length::Fill);
+                for (i, block) in blocks.iter().enumerate() {
+                    let gap = answer::gap_before(i.checked_sub(1).map(|p| &blocks[p]), block);
+                    if gap > 0.0 {
+                        text_col = text_col.push(space::vertical().height(Length::Fixed(gap)));
+                    }
+                    text_col = text_col.push(block_view(block, Type::Reading { lead: answer::is_lead(&blocks, i) }));
+                }
+                if !blocks.is_empty() {
+                    col = col.push(text_col);
+                }
+            } else {
+                for block in &blocks {
+                    col = col.push(block_view(block, Type::Compact));
+                }
             }
             for (i, item) in self.turn.items.iter().enumerate() {
                 col = col.push(self.item_view(i, item));
@@ -684,7 +804,8 @@ impl Overlay {
             col = col.push(text::caption(tr(note)).class(theme::Text::Custom(dim_text)));
             any = true;
         }
-        let measured = cosmic::iced::widget::sensor(container(col).padding([0, 20, 4, 16]).width(Length::Fixed(self.size_to.0)))
+        let padding = if reading { [0, 24, 8, 24] } else { [0, 20, 4, 16] };
+        let measured = cosmic::iced::widget::sensor(container(col).padding(padding).width(Length::Fixed(self.size_to.0)))
             .on_show(Message::BodySize)
             .on_resize(Message::BodySize);
         // Shrink (not Fill): the sensor then measures the answer itself, not the space it has;
@@ -694,7 +815,10 @@ impl Overlay {
 
     fn footer(&self) -> Element<'_, Message> {
         let left = self.status.clone().unwrap_or_else(|| self.helper_name.clone());
-        let hints = if self.machine.confirming {
+        let hints = if let Some(c) = self.closing.filter(|c| c.undo) {
+            let left = answer::seconds_left(c.millis, c.since.elapsed().as_millis() as u64).max(1);
+            trf("Ctrl+Z undoes · closes in {0} s", &[&left.to_string()])
+        } else if self.machine.confirming {
             tr("Enter runs · Esc cancels")
         } else if self.machine.speaking {
             tr("Esc stops reading aloud")
@@ -814,12 +938,13 @@ impl Overlay {
                 }
             }
         }
-        let pill = container(content).width(Length::Fixed(w)).height(Length::Fixed(h)).clip(true);
-        let left = ((SURFACE.0 - w) / 2.0 + shake).max(0.0);
-        let placed = column![space::vertical().height(Length::Fixed(MARGIN)), row![space::horizontal().width(Length::Fixed(left)), pill]];
+        let pill = mouse_area(container(content).width(Length::Fixed(w)).height(Length::Fixed(h)).clip(true)).on_enter(Message::PointerIn);
+        // Centred in the surface (whatever size the compositor gave it yet), moved by the shake.
+        let side = cosmic::iced::Padding { left: (2.0 * shake).max(0.0), right: (-2.0 * shake).max(0.0), ..Default::default() };
+        let placed = column![space::vertical().height(Length::Fixed(MARGIN)), container(pill).padding(side).width(Length::Fill).align_x(cosmic::iced::Alignment::Center)];
         let ring = cosmic::iced::widget::canvas(self.aura()).width(Length::Fill).height(Length::Fill);
         let stack: Element<Message> = cosmic::iced::widget::stack![ring, placed].into();
-        mouse_area(container(stack).width(Length::Fixed(SURFACE.0)).height(Length::Fixed(SURFACE.1))).into()
+        mouse_area(container(stack).width(Length::Fill).height(Length::Fill)).into()
     }
 }
 
@@ -887,22 +1012,97 @@ fn weather_view(w: &actions::weather::Weather) -> Element<'static, Message> {
     container(c).padding(12).width(Length::Fill).class(theme::Container::custom(weather_box)).into()
 }
 
+/// An output's logical size: as xdg-output reports it, else its current mode over its scale.
+fn logical_size(info: &cosmic::cctk::sctk::output::OutputInfo) -> Option<(f32, f32)> {
+    if let Some((w, h)) = info.logical_size.filter(|(w, h)| *w > 0 && *h > 0) {
+        return Some((w as f32, h as f32));
+    }
+    let mode = info.modes.iter().find(|m| m.current)?;
+    let scale = info.scale_factor.max(1) as f32;
+    Some((mode.dimensions.0 as f32 / scale, mode.dimensions.1 as f32 / scale))
+}
+
+/// Hyprland's focused monitor (where an overlay on the "active" output opens).
+fn focused_hyprland_output() -> Option<String> {
+    let out = std::process::Command::new("hyprctl").args(["-j", "monitors"]).stderr(std::process::Stdio::null()).output().ok()?;
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
+    list.iter().find(|m| m.get("focused").and_then(serde_json::Value::as_bool) == Some(true))?.get("name")?.as_str().map(str::to_string)
+}
+
 /// The last `max` characters (live speech scrolls left in the compact field).
 fn tail(text: &str, max: usize) -> String {
     let n = text.chars().count();
     if n <= max { text.to_string() } else { format!("…{}", text.chars().skip(n - max + 1).collect::<String>()) }
 }
 
-fn block_view(block: Block) -> Element<'static, Message> {
+/// How a block is set: the compact pill's size, or the reading view's larger type (`lead`: the
+/// direct answer, the first paragraph, a little larger still).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Type {
+    Compact,
+    Reading { lead: bool },
+}
+
+impl Type {
+    /// Text size and line height of paragraphs and list items.
+    fn body(self) -> (f32, f32) {
+        match self {
+            Type::Compact => (14.5, 1.45),
+            Type::Reading { lead: true } => (17.0, 1.4),
+            Type::Reading { lead: false } => (15.0, 1.55),
+        }
+    }
+
+    fn heading(self) -> f32 {
+        if self == Type::Compact { 14.5 } else { 16.0 }
+    }
+}
+
+/// A block's inline markup as rich text in the desktop's interface font (fonts.rs): bold,
+/// italic, and inline code in the monospace font on a faint tint.
+fn rich(raw: &str, size: f32, line: f32, weight: cosmic::iced::font::Weight) -> Element<'static, Message> {
+    use cosmic::iced::font::{Style, Weight};
+    use cosmic::iced::widget::{rich_text, span};
+    let c = cosmic::theme::active();
+    let mut tint = Color::from(c.cosmic().on_bg_color());
+    tint.a = 0.09;
+    let spans: Vec<cosmic::iced::widget::text::Span<'static, (), cosmic::font::Font>> = markdown::spans(raw)
+        .into_iter()
+        .map(|s| {
+            if s.code {
+                return span(s.text)
+                    .font(cosmic::font::Font { weight: if s.bold { Weight::Bold } else { Weight::Normal }, ..cosmic::font::mono() })
+                    .size(size * 0.88)
+                    .background(tint)
+                    .border(Border { radius: corners::now().small.into(), ..Default::default() })
+                    .padding([0, 3]);
+            }
+            let mut font = fonts::prose_weight(if s.bold { Weight::Bold } else { weight });
+            if s.italic {
+                font.style = Style::Italic;
+            }
+            span(s.text).font(font)
+        })
+        .collect();
+    rich_text(spans).size(size).line_height(cosmic::iced::widget::text::LineHeight::Relative(line)).width(Length::Fill).into()
+}
+
+fn block_view(block: &Block, kind: Type) -> Element<'static, Message> {
+    use cosmic::iced::font::Weight;
+    let (size, line) = kind.body();
     match block {
-        Block::Heading(t) => text::heading(t).into(),
-        Block::Paragraph(t) => text::body(t).size(14.5).line_height(cosmic::iced::widget::text::LineHeight::Relative(1.45)).into(),
-        Block::Item(marker, t) => row![
-            text::body(marker).width(Length::Fixed(22.0)),
-            text::body(t).size(14.5).line_height(cosmic::iced::widget::text::LineHeight::Relative(1.45)).width(Length::Fill),
-        ]
-        .into(),
-        Block::Code(t) => container(text::body(t).font(cosmic::font::mono()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)).into(),
+        Block::Heading(t) => rich(t, kind.heading(), 1.3, Weight::Semibold),
+        Block::Paragraph(t) => rich(t, size, line, Weight::Normal),
+        Block::Item(marker, t) => {
+            // The marker in a fixed column: wrapped lines and every item's text start at one edge.
+            let width = if kind == Type::Compact { 22.0 } else if marker.chars().count() > 2 { 30.0 } else { 24.0 };
+            row![
+                text::body(marker.clone()).size(size).line_height(cosmic::iced::widget::text::LineHeight::Relative(line)).font(fonts::prose()).class(theme::Text::Custom(dim_text)).width(Length::Fixed(width)),
+                rich(t, size, line, Weight::Normal),
+            ]
+            .into()
+        }
+        Block::Code(t) => container(text::body(t.clone()).font(cosmic::font::mono()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)).into(),
     }
 }
 
@@ -1025,7 +1225,11 @@ enum Mode {
 }
 
 struct AuraCanvas {
-    pill: Rectangle,
+    /// The pill's size; it sits centred in the surface, `shake` px to the side, MARGIN from the top.
+    size: Size,
+    shake: f32,
+    /// An auto-close counting down: the part left (a thin line along the pill's bottom).
+    countdown: Option<f32>,
     radius: f32,
     colors: AuraColors,
     accent: AuraColors,
@@ -1049,9 +1253,9 @@ fn grow(r: Rectangle, by: f32) -> Rectangle {
 
 impl AuraCanvas {
     /// The stroke's gradient: across the pill, turned by `angle`.
-    fn gradient(&self, colors: &AuraColors, angle: f32, alpha: f32) -> canvas::Style {
-        let c = self.pill.center();
-        let (dx, dy) = (angle.cos() * self.pill.width / 2.0, angle.sin() * self.pill.width / 2.0);
+    fn gradient(&self, pill: Rectangle, colors: &AuraColors, angle: f32, alpha: f32) -> canvas::Style {
+        let c = pill.center();
+        let (dx, dy) = (angle.cos() * pill.width / 2.0, angle.sin() * pill.width / 2.0);
         let linear = canvas::gradient::Linear::new(Point::new(c.x - dx, c.y - dy), Point::new(c.x + dx, c.y + dy))
             .add_stop(0.0, color(colors.primary, alpha))
             .add_stop(0.5, color(colors.secondary, alpha))
@@ -1065,7 +1269,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
 
     fn draw(&self, _: &(), renderer: &cosmic::Renderer, _: &cosmic::Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry<cosmic::Renderer>> {
         let mut frame = Frame::new(renderer, bounds.size());
-        let pill = self.pill;
+        let pill = Rectangle::new(Point::new((bounds.width - self.size.width) / 2.0 + self.shake, MARGIN), self.size);
         let r = self.radius;
         // How strong the ring and its bloom are, how wide, which way the colours run.
         let level = self.level;
@@ -1099,7 +1303,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
                 let f = i as f32 / (layers + 1) as f32;
                 let a = bloom * 0.6 * (1.0 - f).powf(1.6);
                 let ring = grow(pill, f * 16.0);
-                frame.stroke(&rounded(ring, r + f * 16.0), Stroke { style: self.gradient(&colors, angle, a), width: 2.4, ..Default::default() });
+                frame.stroke(&rounded(ring, r + f * 16.0), Stroke { style: self.gradient(pill, &colors, angle, a), width: 2.4, ..Default::default() });
             }
         }
         frame.fill(&rounded(pill, r), self.surface);
@@ -1108,11 +1312,19 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
             let p = aura::ripple(self.phase_t);
             let inset = p * (pill.height / 2.0).min(14.0);
             let inner = grow(pill, -inset);
-            frame.stroke(&rounded(inner, (r - inset).max(2.0)), Stroke { style: self.gradient(&colors, 0.0, 0.55 * (1.0 - p)), width: 1.5, ..Default::default() });
+            frame.stroke(&rounded(inner, (r - inset).max(2.0)), Stroke { style: self.gradient(pill, &colors, 0.0, 0.55 * (1.0 - p)), width: 1.5, ..Default::default() });
         }
         // The ring.
         let half = width / 2.0;
-        frame.stroke(&rounded(grow(pill, -half), (r - half).max(0.0)), Stroke { style: self.gradient(&colors, angle, alpha), width, ..Default::default() });
+        frame.stroke(&rounded(grow(pill, -half), (r - half).max(0.0)), Stroke { style: self.gradient(pill, &colors, angle, alpha), width, ..Default::default() });
+        // An auto-close counting down: a thin line along the bottom, shrinking to the left.
+        if let Some(left) = self.countdown {
+            let inset = r.max(12.0);
+            let full = (pill.width - 2.0 * inset).max(0.0);
+            let y = pill.y + pill.height - 3.0;
+            let line = Path::line(Point::new(pill.x + inset, y), Point::new(pill.x + inset + full * left, y));
+            frame.stroke(&line, Stroke { style: canvas::Style::Solid(color(self.accent.primary, 0.55)), width: 2.0, line_cap: canvas::LineCap::Round, ..Default::default() });
+        }
         // The state dot left of the field: listening grows with the voice, thinking spins.
         let dot = Point::new(pill.x + 22.0, pill.y + 26.0);
         match self.mode {
@@ -1201,7 +1413,15 @@ impl cosmic::Application for Overlay {
             speak_gen: 0,
             speak: None,
             speaking_since: None,
+            view: View::Compact,
+            outputs: vec![],
+            reading: (answer::READING_WIDTH, answer::READING_FALLBACK_HEIGHT),
+            surface_size: SURFACE,
+            closing: None,
+            close_gen: 0,
+            close_kept: false,
         };
+        fonts::load(look::desktop());
         let theme = corners::set_app_theme(&app.settings.corners);
         let open = if app.output_wanted.is_some() {
             // Wait for that output to be announced (a second at most, then the active one).
@@ -1239,7 +1459,8 @@ impl cosmic::Application for Overlay {
                         Key::Character(c) if modifiers.control() && !modifiers.shift() && c.eq_ignore_ascii_case("z") => Some(Message::Undo(None)),
                         // Enter when the field doesn't have it (it would send Submit itself).
                         Key::Named(Named::Enter) if status == cosmic::iced::event::Status::Ignored => Some(Message::Submit),
-                        _ => None,
+                        // Any other key: the answer stays open (no auto-close).
+                        _ => Some(Message::Activity),
                     }
                 }
                 cosmic::iced::Event::PlatformSpecific(cosmic::iced::event::PlatformSpecific::Wayland(WaylandEvent::Layer(event, _, id))) => {
@@ -1250,7 +1471,10 @@ impl cosmic::Application for Overlay {
                     None
                 }
                 cosmic::iced::Event::PlatformSpecific(cosmic::iced::event::PlatformSpecific::Wayland(WaylandEvent::Output(OutputEvent::Created(Some(info)), output))) => {
-                    Some(Message::Output(info.name.clone().unwrap_or_default(), output))
+                    Some(Message::Output(info.name.clone().unwrap_or_default(), logical_size(&info), output))
+                }
+                cosmic::iced::Event::PlatformSpecific(cosmic::iced::event::PlatformSpecific::Wayland(WaylandEvent::Output(OutputEvent::InfoUpdate(info), _))) => {
+                    Some(Message::OutputInfo(info.name.clone().unwrap_or_default(), logical_size(&info)))
                 }
                 _ => None,
             }),
@@ -1263,6 +1487,10 @@ impl cosmic::Application for Overlay {
         if let Some((text, language)) = &self.speak {
             let key = (self.speak_gen, text.clone(), language.clone());
             subs.push(Subscription::run_with(key, voice::speak).with(self.speak_gen).map(|(generation, event)| Message::Speak(generation, event)));
+        }
+        if self.closing.is_some_and(|c| c.undo) && self.reduced {
+            // The footer's countdown (no line moves with reduced motion).
+            subs.push(cosmic::iced::time::every(Duration::from_millis(250)).map(|_| Message::Frame));
         }
         if self.animating() {
             subs.push(cosmic::iced::time::every(Duration::from_millis(16)).map(|_| Message::Frame));
@@ -1277,11 +1505,33 @@ impl cosmic::Application for Overlay {
         if *DEBUG && !matches!(message, Message::Frame | Message::LookTick | Message::Voice(_, VoiceEvent::Level(_))) {
             eprintln!("maprisma-dictation: {}", format!("{message:?}").chars().take(160).collect::<String>());
         }
+        if matches!(message, Message::Activity | Message::PointerIn | Message::Input(_) | Message::Submit | Message::ToggleMic | Message::CopyAnswer | Message::Undo(_) | Message::Pick(..) | Message::ShotKey(_)) {
+            self.keep_open();
+        }
         match message {
-            Message::Output(name, output) => {
+            Message::Output(name, size, output) => {
+                self.note_output(name.clone(), size);
                 if self.surface.is_none() && self.output_wanted.as_deref() == Some(name.as_str()) {
                     return self.open(IcedOutput::Output(output));
                 }
+            }
+            Message::OutputInfo(name, size) => self.note_output(name, size),
+            Message::Activity | Message::PointerIn => {}
+            Message::AutoClose(generation) => {
+                if generation != self.close_gen || self.close_kept {
+                    return Task::none();
+                }
+                let Some(closing) = self.closing.take() else { return Task::none() };
+                let m = &self.machine;
+                if m.phase != Phase::Done || m.confirming || !m.text.trim().is_empty() || self.voice_on.is_some() {
+                    return Task::none();
+                }
+                if self.speak.is_some() || m.speaking {
+                    // Let it finish reading the confirmation aloud first.
+                    self.closing = Some(closing);
+                    return Task::perform(tokio::time::sleep(Duration::from_millis(300)), move |_| cosmic::Action::App(Message::AutoClose(generation)));
+                }
+                return self.run(vec![Effect::Close]);
             }
             Message::OpenFallback => return self.open(IcedOutput::Active),
             Message::Command(Command::Toggle | Command::Close) => return self.run(vec![Effect::Close]),
@@ -1377,6 +1627,11 @@ impl cosmic::Application for Overlay {
                 } else {
                     Turn::default()
                 };
+                self.view = answer::classify(&self.shown, self.turn.items.len());
+                if self.view == View::Reading {
+                    self.reading = answer::reading_size(self.output_size(), (EXPANDED_WIDTH, MAX_HEIGHT));
+                }
+                self.body_height = None;
                 if self.settings.speak_answers && !self.flags.demo && !self.shown.is_empty() {
                     self.speak_gen += 1;
                     self.speak = Some((self.shown.clone(), voice::speak_language(&ui_language(&self.settings.language)).to_string()));
@@ -1405,8 +1660,9 @@ impl cosmic::Application for Overlay {
             }
             Message::ActionDone(generation, i, outcome) => {
                 if generation == self.turn_gen {
+                    // body_height stays: the sensor reports when the chip changes the size (the
+                    // estimate knows no chips, and a same-size chip would leave it too small).
                     self.turn.finished(i, outcome, crate::last::now());
-                    self.body_height = None;
                     return self.pump();
                 }
             }
@@ -1571,10 +1827,15 @@ mod tests {
 
     #[test]
     fn heights_grow_with_the_answer_and_stop_at_the_maximum() {
-        let short = estimate_height(&markdown::parse("Noon."), true, EXPANDED_WIDTH);
+        let short = estimate_height(&markdown::parse("Noon."), true, EXPANDED_WIDTH, MAX_HEIGHT, false);
         assert!(short > COMPACT.1 && short < 200.0, "{short}");
-        let long = estimate_height(&markdown::parse(&"word ".repeat(600)), true, EXPANDED_WIDTH);
+        let long = estimate_height(&markdown::parse(&"word ".repeat(600)), true, EXPANDED_WIDTH, MAX_HEIGHT, false);
         assert_eq!(long, MAX_HEIGHT);
+        // The reading view: wider lines hold more, and it may grow taller.
+        let text = markdown::parse(&"word ".repeat(150));
+        let (compact, reading) = (estimate_height(&text, true, EXPANDED_WIDTH, 2000.0, false), estimate_height(&text, true, answer::READING_WIDTH, 2000.0, true));
+        assert!(reading < compact, "{reading} < {compact}");
+        assert_eq!(estimate_height(&markdown::parse(&"word ".repeat(2000)), true, answer::READING_WIDTH, 756.0, true), 756.0);
         assert_eq!(tail("abcdef", 4), "…def");
         assert_eq!(tail("abc", 4), "abc");
     }

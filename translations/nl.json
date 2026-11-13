@@ -22,6 +22,7 @@
  "Could not start the helper: {0}": "Kon de helper niet starten: {0}",
  "Could not start: {0}": "Kon niet starten: {0}",
  "Ctrl+Z undoes · Enter asks · Esc closes": "Ctrl+Z maakt ongedaan · Enter vraagt · Esc sluit",
+ "Ctrl+Z undoes · closes in {0} s": "Ctrl+Z maakt ongedaan · sluit over {0} s",
  "Dark theme": "Donker thema",
  "Dark theme: {0}": "Donker thema: {0}",
  "Deleting files outside the trash is never done from here.": "Bestanden buiten de prullenbak worden hiervandaan nooit verwijderd.",

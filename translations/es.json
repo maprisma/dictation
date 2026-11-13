@@ -22,6 +22,7 @@
  "Could not start the helper: {0}": "No se pudo iniciar el asistente: {0}",
  "Could not start: {0}": "No se pudo iniciar: {0}",
  "Ctrl+Z undoes · Enter asks · Esc closes": "Ctrl+Z deshace · Intro pregunta · Esc cierra",
+ "Ctrl+Z undoes · closes in {0} s": "Ctrl+Z deshace · se cierra en {0} s",
  "Dark theme": "Tema oscuro",
  "Dark theme: {0}": "Tema oscuro: {0}",
  "Deleting files outside the trash is never done from here.": "Desde aquí nunca se borran archivos fuera de la papelera.",

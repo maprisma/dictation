@@ -22,6 +22,7 @@
  "Could not start the helper: {0}": "Impossible de démarrer l'assistant : {0}",
  "Could not start: {0}": "Impossible de démarrer : {0}",
  "Ctrl+Z undoes · Enter asks · Esc closes": "Ctrl+Z annule · Entrée demande · Échap ferme",
+ "Ctrl+Z undoes · closes in {0} s": "Ctrl+Z annule · se ferme dans {0} s",
  "Dark theme": "Thème sombre",
  "Dark theme: {0}": "Thème sombre : {0}",
  "Deleting files outside the trash is never done from here.": "Les fichiers ne sont jamais supprimés d’ici hors de la corbeille.",

@@ -22,6 +22,7 @@
  "Could not start the helper: {0}": "Nie udało się uruchomić asystenta: {0}",
  "Could not start: {0}": "Nie udało się uruchomić: {0}",
  "Ctrl+Z undoes · Enter asks · Esc closes": "Ctrl+Z cofa · Enter pyta · Esc zamyka",
+ "Ctrl+Z undoes · closes in {0} s": "Ctrl+Z cofa · zamknie się za {0} s",
  "Dark theme": "Ciemny motyw",
  "Dark theme: {0}": "Ciemny motyw: {0}",
  "Deleting files outside the trash is never done from here.": "Pliki poza koszem nigdy nie są stąd usuwane.",

@@ -22,6 +22,7 @@
  "Could not start the helper: {0}": "Could not start the helper: {0}",
  "Could not start: {0}": "Could not start: {0}",
  "Ctrl+Z undoes · Enter asks · Esc closes": "Ctrl+Z undoes · Enter asks · Esc closes",
+ "Ctrl+Z undoes · closes in {0} s": "Ctrl+Z undoes · closes in {0} s",
  "Dark theme": "Dark theme",
  "Dark theme: {0}": "Dark theme: {0}",
  "Deleting files outside the trash is never done from here.": "Deleting files outside the trash is never done from here.",

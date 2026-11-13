@@ -1,5 +1,6 @@
 //! Markdown-light for answers: paragraphs, headings, bullet and numbered lists, and code
-//! (fenced blocks and `inline`). Emphasis markers are dropped; everything else stays text.
+//! (fenced blocks and `inline`). [parse] drops the emphasis markers (plain text); [parse_raw]
+//! keeps them for [spans], which the overlay draws as bold, italic and inline code.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
@@ -60,7 +61,72 @@ fn list_item(line: &str) -> Option<(String, String)> {
     None
 }
 
+/// The blocks as plain text (emphasis markers and backticks dropped).
 pub fn parse(text: &str) -> Vec<Block> {
+    parse_with(text, inline)
+}
+
+/// The blocks with their inline markup kept (for [spans]).
+pub fn parse_raw(text: &str) -> Vec<Block> {
+    parse_with(text, str::to_string)
+}
+
+/// A run of text in one style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+}
+
+/// A block's inline markup as styled runs: `**bold**`/`__bold__`, `*italic*` (a `*` next to a
+/// word, so "2 * 3" stays) and `` `code` ``. The runs' text together is what [inline] gives.
+pub fn spans(text: &str) -> Vec<Span> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<Span> = vec![];
+    let (mut bold, mut italic) = (false, false);
+    let push = |out: &mut Vec<Span>, t: &str, bold: bool, italic: bool, code: bool| {
+        if t.is_empty() {
+            return;
+        }
+        match out.last_mut() {
+            Some(last) if last.bold == bold && last.italic == italic && last.code == code => last.text.push_str(t),
+            _ => out.push(Span { text: t.to_string(), bold, italic, code }),
+        }
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            if let Some(end) = chars[i + 1..].iter().position(|&x| x == '`') {
+                let code: String = chars[i + 1..i + 1 + end].iter().collect();
+                push(&mut out, &code, bold, italic, true);
+                i += end + 2;
+                continue;
+            }
+        }
+        if (c == '*' || c == '_') && i + 1 < chars.len() && chars[i + 1] == c {
+            bold = !bold;
+            i += 2;
+            continue;
+        }
+        if c == '*' {
+            let next_word = chars.get(i + 1).is_some_and(|n| !n.is_whitespace());
+            let prev_word = i > 0 && !chars[i - 1].is_whitespace();
+            if next_word || prev_word {
+                italic = !italic;
+                i += 1;
+                continue;
+            }
+        }
+        push(&mut out, &c.to_string(), bold, italic, false);
+        i += 1;
+    }
+    out
+}
+
+fn parse_with(text: &str, inline: fn(&str) -> String) -> Vec<Block> {
     let mut blocks = vec![];
     let mut paragraph: Vec<String> = vec![];
     let mut code: Option<Vec<String>> = None;
@@ -134,5 +200,22 @@ mod tests {
         assert_eq!(parse("```\nopen"), vec![Block::Code("open".into())]);
         assert_eq!(parse(""), vec![]);
         assert_eq!(inline("2 * 3 = 6, a_b"), "2 * 3 = 6, a_b");
+    }
+
+    #[test]
+    fn styled_runs() {
+        let s = |t: &str, bold: bool, italic: bool, code: bool| Span { text: t.into(), bold, italic, code };
+        assert_eq!(
+            spans("Ja, **Yamaha** ist *gut*: `FG800` und mehr"),
+            vec![s("Ja, ", false, false, false), s("Yamaha", true, false, false), s(" ist ", false, false, false), s("gut", false, true, false), s(": ", false, false, false), s("FG800", false, false, true), s(" und mehr", false, false, false)]
+        );
+        assert_eq!(spans("2 * 3 = 6, a_b"), vec![s("2 * 3 = 6, a_b", false, false, false)]);
+        assert_eq!(spans("**bold `code`**"), vec![s("bold ", true, false, false), s("code", true, false, true)]);
+        assert_eq!(spans(""), vec![]);
+        // The runs are the plain text, and parse_raw keeps what parse drops.
+        for t in ["Open the **settings** and *go* on", "x `a*b` y", "**unclosed", "a__b__c"] {
+            assert_eq!(spans(t).iter().map(|s| s.text.as_str()).collect::<String>(), inline(t), "{t}");
+        }
+        assert_eq!(parse_raw("## **H**\n- *i*"), vec![Block::Heading("**H**".into()), Block::Item("•".into(), "*i*".into())]);
     }
 }
