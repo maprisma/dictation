@@ -33,6 +33,12 @@ MicButton(
 
 - The button is **hidden** unless the service is installed, switched on and ready. It checks again when it
   appears, when the window comes back to the front and when the field gets focus.
+- Esc (or a click) while it is still starting cancels that start too: the session that comes back
+  is disposed at once, and no second start runs meanwhile.
+- Every wait is bounded: `status --json` is killed and reaped after `VoiceInput.statusTimeout`
+  (8 s) or 64 KiB of output; after `cancel()` without `closed` for `VoiceInput.cancelTimeout`
+  (5 s) the session ends as `cancelled` and the program is ended (stdin closed, SIGTERM after
+  `grace`, then SIGKILL).
 - An external engine that types the text itself (`typed: true`) inserts nothing here.
 - The four texts go into each app's translations (all 8 languages): `Dictate`, `Stop and insert`,
   `Listening…`, `Dictation is not available: {0}`.

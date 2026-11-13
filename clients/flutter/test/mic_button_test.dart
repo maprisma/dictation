@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:APP/mic_button.dart';
+import 'package:APP/voice_input.dart';
 
 import 'voice_fake.dart';
 
@@ -119,6 +120,34 @@ void main() {
       expect(controller.text, 'Find');
       expect(fake.stdinLines, ['cancel']);
       expect(find.byTooltip('Dictate'), findsOneWidget);
+    });
+
+    testWidgets('Esc while it is still starting: the session that comes back is dropped', (tester) async {
+      final old = VoiceInput.startDelay;
+      VoiceInput.startDelay = const Duration(milliseconds: 300);
+      addTearDown(() => VoiceInput.startDelay = old);
+      await pump(tester);
+      await tester.tap(find.byKey(const ValueKey('voice-mic')));
+      await tester.pump();
+      expect(find.byTooltip('Stop and insert'), findsOneWidget); // starting
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(find.byTooltip('Dictate'), findsOneWidget);
+      // a click while the cancelled start is still on its way starts nothing more
+      await tester.tap(find.byKey(const ValueKey('voice-mic')));
+      await settle(tester);
+      expect(find.byTooltip('Dictate'), findsOneWidget);
+      expect(partials, isNot(contains('Listening…')));
+      expect(fake.args.where((a) => a.startsWith('dictate')).length, 1);
+      // the session it got was disposed: stdin closed, which cancels
+      expect(fake.stdinLines, ['EOF']);
+      // and a new click after that works normally
+      await tester.tap(find.byKey(const ValueKey('voice-mic')));
+      await settle(tester);
+      expect(find.byTooltip('Stop and insert'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await settle(tester);
+      expect(fake.stdinLines, ['EOF', 'cancel']);
     });
 
     testWidgets('typed by an external engine: nothing inserted', (tester) async {

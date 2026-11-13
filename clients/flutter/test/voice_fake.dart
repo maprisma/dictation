@@ -27,7 +27,9 @@ final class FakeVoice {
     script.writeAsStringSync('''#!/bin/sh
 echo "\$@" >> "$d/args.log"
 case "\$1" in
-  status) cat "$d/status.json"; exit 0 ;;
+  status)
+    if [ -f "$d/hang-status" ]; then echo \$\$ > "$d/status.pid"; exec sleep 30; fi
+    cat "$d/status.json"; exit 0 ;;
   dictate) ;;
   *) exit 2 ;;
 esac
@@ -41,6 +43,7 @@ echo 'not json'
 echo '{"event":"state","state":"listening"}'
 echo '{"event":"level","rms":0.4}'
 echo '{"event":"partial","text":"hello"}'
+if [ -f "$d/deaf" ]; then echo \$\$ > "$d/dictate.pid"; exec sleep 30; fi
 while IFS= read -r line; do
   echo "\$line" >> "$d/stdin.log"
   case "\$line" in
@@ -78,6 +81,32 @@ exit 1
   void result(String text, {bool typed = false}) {
     File('${dir.path}/final.txt').writeAsStringSync(text);
     File('${dir.path}/typed').writeAsStringSync(typed ? 'true' : 'false');
+  }
+
+  /// `status --json` never answers (it writes its pid to status.pid first).
+  void hangStatus() {
+    File('${dir.path}/hang-status').writeAsStringSync('1');
+    VoiceInput.forget();
+  }
+
+  /// The next dictation never reads stdin and never ends by itself (pid in dictate.pid).
+  void deaf() => File('${dir.path}/deaf').writeAsStringSync('1');
+
+  /// The pid a hanging fake wrote, and whether that process still runs (not a zombie).
+  int? pid(String name) {
+    final f = File('${dir.path}/$name');
+    return f.existsSync() ? int.tryParse(f.readAsStringSync().trim()) : null;
+  }
+
+  static bool running(int pid) {
+    final f = File('/proc/$pid/stat');
+    if (!f.existsSync()) return false;
+    try {
+      final stat = f.readAsStringSync();
+      return !stat.substring(stat.lastIndexOf(')') + 1).trimLeft().startsWith('Z');
+    } on FileSystemException {
+      return false;
+    }
   }
 
   /// The next dictation fails to start.

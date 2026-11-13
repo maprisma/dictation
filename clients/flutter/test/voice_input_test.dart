@@ -145,6 +145,43 @@ void main() {
       expect((seen.last as VoiceClosed).reason, 'error');
       expect(await s.exitCode.timeout(const Duration(seconds: 5)), isNot(0));
     });
+
+    test('a status check that hangs: missing, and the program is killed and reaped', () async {
+      fake.hangStatus();
+      final old = VoiceInput.statusTimeout;
+      VoiceInput.statusTimeout = const Duration(milliseconds: 300);
+      addTearDown(() => VoiceInput.statusTimeout = old);
+      final started = DateTime.now();
+      expect((await VoiceInput.available()).installed, isFalse);
+      expect(DateTime.now().difference(started), lessThan(const Duration(seconds: 3)));
+      final pid = fake.pid('status.pid');
+      expect(pid, isNotNull);
+      expect(FakeVoice.running(pid!), isFalse, reason: 'the status program still runs');
+    });
+
+    test('too much status output counts as missing', () async {
+      File('${fake.dir.path}/status.json').writeAsStringSync('{"enabled":true,"ready":true,"x":"${'a' * (VoiceInput.statusMaxBytes + 10)}"}');
+      VoiceInput.forget();
+      expect((await VoiceInput.available()).installed, isFalse);
+    });
+
+    test('cancel has a deadline: a program that ignores it is ended', () async {
+      fake.deaf();
+      final old = (VoiceInput.cancelTimeout, VoiceInput.grace);
+      VoiceInput.cancelTimeout = const Duration(milliseconds: 300);
+      VoiceInput.grace = const Duration(milliseconds: 100);
+      addTearDown(() {
+        VoiceInput.cancelTimeout = old.$1;
+        VoiceInput.grace = old.$2;
+      });
+      final s = await VoiceInput.start(appId: 'com.maprisma.Test');
+      final started = DateTime.now();
+      final seen = await until(s, (e) => e is VoicePartial, s.cancel);
+      expect((seen.last as VoiceClosed).reason, 'cancelled');
+      expect(DateTime.now().difference(started), lessThan(const Duration(seconds: 3)));
+      expect(await s.exitCode.timeout(const Duration(seconds: 5)), isNot(0));
+      expect(FakeVoice.running(fake.pid('dictate.pid')!), isFalse);
+    });
   });
 
   test('under flutter test the real service is never used without an environment', () async {

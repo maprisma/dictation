@@ -95,6 +95,13 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
   StreamSubscription<VoiceEvent>? _sub;
   MicPhase _phase = MicPhase.idle;
   String _error = '';
+
+  /// Bumped by every start and by a cancel before the session exists: a [VoiceInput.start]
+  /// that comes back for an older number is disposed at once, never listened to.
+  int _startGen = 0;
+
+  /// A [VoiceInput.start] is still on its way (no second one meanwhile).
+  bool _startPending = false;
   Timer? _clear;
   late final Ticker _ticker = createTicker(_tick);
   final _ring = _RingState();
@@ -153,31 +160,55 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
         _session?.finish();
         _setPhase(MicPhase.transcribing);
       case MicPhase.starting:
-        _session?.cancel();
+        _cancel();
       case MicPhase.transcribing:
         break;
       case MicPhase.idle || MicPhase.done || MicPhase.error:
-        await _start();
+        if (!_startPending) await _start();
     }
   }
 
   Future<void> _start() async {
     _clear?.cancel();
     _error = '';
+    final gen = ++_startGen;
+    _startPending = true;
     _setPhase(MicPhase.starting);
     HardwareKeyboard.instance.addHandler(_key);
+    VoiceSession? session;
+    Object? failure;
     try {
-      final session = await VoiceInput.start(appId: widget.appId, language: widget.language);
-      if (!mounted) {
-        session.dispose();
-        return;
-      }
-      _session = session;
-      _sub = session.events.listen(_event);
+      session = await VoiceInput.start(appId: widget.appId, language: widget.language);
     } on Object catch (e) {
-      _event(VoiceError('start', '$e'));
-      _event(const VoiceClosed('error'));
+      failure = e;
+    } finally {
+      _startPending = false;
     }
+    // Cancelled (Esc, a click) or superseded while it was starting, or the widget is gone.
+    if (!mounted || gen != _startGen) {
+      session?.dispose();
+      return;
+    }
+    if (session == null) {
+      _event(VoiceError('start', '$failure'));
+      _event(const VoiceClosed('error'));
+      return;
+    }
+    _session = session;
+    _sub = session.events.listen(_event);
+  }
+
+  /// Esc, or a click while starting: cancels the session, or the start still on its way.
+  void _cancel() {
+    final session = _session;
+    if (session != null) {
+      session.cancel();
+      return;
+    }
+    _startGen++; // the pending start is disposed when it comes back
+    HardwareKeyboard.instance.removeHandler(_key);
+    _partial('');
+    _setPhase(MicPhase.idle);
   }
 
   void _event(VoiceEvent e) {
@@ -241,13 +272,7 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
   /// Esc while it runs cancels (before the window's own Esc handling).
   bool _key(KeyEvent event) {
     if (!_running || event.logicalKey != LogicalKeyboardKey.escape) return false;
-    if (event is KeyDownEvent) {
-      if (_session != null) {
-        _session!.cancel();
-      } else {
-        _setPhase(MicPhase.idle);
-      }
-    }
+    if (event is KeyDownEvent) _cancel();
     return true;
   }
 

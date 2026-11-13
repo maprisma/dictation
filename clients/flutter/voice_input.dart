@@ -198,8 +198,18 @@ abstract final class VoiceInput {
   /// After `finish`, no `closed` within this time: the program is ended.
   static Duration finishTimeout = const Duration(seconds: 90);
 
+  /// After `cancel`, no `closed` within this time: the session counts as cancelled, stdin is
+  /// closed and the program is ended (SIGTERM after [grace], then SIGKILL).
+  static Duration cancelTimeout = const Duration(seconds: 5);
+
   /// After stdin closes, the program has this long to end before it is killed.
   static Duration grace = const Duration(seconds: 2);
+
+  /// `status --json` output beyond this many bytes counts as broken.
+  static const statusMaxBytes = 64 * 1024;
+
+  /// Tests: [start] waits this long before it starts the program (a slow start).
+  static Duration startDelay = Duration.zero;
 
   static VoiceStatus? _cached;
   static DateTime? _cachedAt;
@@ -251,16 +261,56 @@ abstract final class VoiceInput {
     final exe = executable();
     if (exe != null) {
       try {
-        final r = await Process.run(exe, const ['status', '--json'], environment: environment, stdoutEncoding: utf8)
-            .timeout(statusTimeout);
-        if (r.exitCode == 0) status = VoiceStatus.parse('${r.stdout}');
+        final out = await _statusJson(exe);
+        if (out != null) status = VoiceStatus.parse(out);
       } on Object {
-        status = VoiceStatus.missing; // no D-Bus, timed out, not runnable
+        status = VoiceStatus.missing; // no D-Bus, not runnable
       }
     }
     _cached = status;
     _cachedAt = DateTime.now();
     return status;
+  }
+
+  /// Runs `status --json`: its stdout (at most [statusMaxBytes]) when it exits 0 in time; on a
+  /// timeout or too much output the program is killed (SIGTERM, SIGKILL after a second) and
+  /// reaped, never left running.
+  static Future<String?> _statusJson(String exe) async {
+    final p = await Process.start(exe, const ['status', '--json'], environment: environment);
+    final out = <int>[];
+    var tooMuch = false;
+    final done = Completer<void>();
+    p.stdin.close().catchError((_) {});
+    p.stderr.listen((_) {}, onError: (_) {});
+    p.stdout.listen((b) {
+      if (tooMuch) return;
+      out.addAll(b);
+      if (out.length > statusMaxBytes) {
+        tooMuch = true;
+        if (!done.isCompleted) done.complete();
+      }
+    }, onError: (_) {}, onDone: () {
+      if (!done.isCompleted) done.complete();
+    });
+    int? code;
+    try {
+      code = await p.exitCode.timeout(statusTimeout);
+    } on TimeoutException {
+      code = null;
+    }
+    // After the exit, the rest of the output (something it started may hold the pipe: not forever).
+    if (code != null) await done.future.timeout(const Duration(seconds: 1), onTimeout: () {});
+    if (code == null || tooMuch) {
+      p.kill();
+      try {
+        await p.exitCode.timeout(const Duration(seconds: 1));
+      } on TimeoutException {
+        p.kill(ProcessSignal.sigkill);
+        await p.exitCode.timeout(const Duration(seconds: 2), onTimeout: () => -1);
+      }
+      return null;
+    }
+    return code == 0 ? utf8.decode(out, allowMalformed: true) : null;
   }
 
   /// Starts a dictation for [appId]. [release]: it ends on [VoiceSession.finish] (a second click);
@@ -276,6 +326,7 @@ abstract final class VoiceInput {
       appId,
       if (language != null && language.isNotEmpty) ...['--language', language],
     ];
+    if (startDelay > Duration.zero) await Future<void>.delayed(startDelay);
     final process = await Process.start(exe, args, environment: environment);
     return VoiceSession._(process);
   }
@@ -304,7 +355,7 @@ final class VoiceSession {
   final _controller = StreamController<VoiceEvent>();
   final _stderr = <int>[];
   final _exited = Completer<int>();
-  Timer? _watch, _kill;
+  Timer? _watch, _kill, _cancelWatch;
   bool _started = false, _errored = false, _closed = false, _stdinClosed = false, _stdoutClosed = false;
   int? _exit;
 
@@ -327,6 +378,7 @@ final class VoiceSession {
     if (e is VoiceClosed) {
       _closed = true;
       _watch?.cancel();
+      _cancelWatch?.cancel();
       _controller.add(e);
       _controller.close();
       dispose(); // the program ends by itself now; killed if it does not
@@ -379,8 +431,16 @@ final class VoiceSession {
     });
   }
 
-  /// Stop without text.
-  void cancel() => _write('cancel\n');
+  /// Stop without text. If no `closed` comes within [VoiceInput.cancelTimeout], the session ends
+  /// as `cancelled` anyway and the program is ended ([dispose]'s escalation).
+  void cancel() {
+    _write('cancel\n');
+    if (_closed || _cancelWatch != null) return;
+    _cancelWatch = Timer(VoiceInput.cancelTimeout, () {
+      if (_closed) return;
+      _emit(const VoiceClosed('cancelled')); // also disposes
+    });
+  }
 
   void _closeStdin() {
     if (_stdinClosed) return;
