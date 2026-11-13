@@ -204,17 +204,24 @@ impl Overlay {
         if !expanded {
             return COMPACT;
         }
-        let height = match &m.phase {
-            Phase::Thinking => COMPACT.1 + 1.0 + 10.0 + 22.0 + 12.0,
-            Phase::Error(e) => COMPACT.1 + 1.0 + 12.0 + 22.0 * (e.chars().count() as f32 / 58.0).ceil().max(1.0) + 12.0 + 26.0,
-            _ if !m.answer.is_empty() => match self.body_height {
-                // the field, divider, gap, body, footer
-                Some(body) => COMPACT.1 + 1.0 + 10.0 + body + 4.0 + 30.0,
-                None => estimate_height(&markdown::parse(&m.answer), !m.question.is_empty(), EXPANDED_WIDTH),
-            },
-            _ => COMPACT.1 + 30.0,
+        // The field, divider, gap, body, footer: the body as measured once laid out.
+        let chrome = COMPACT.1 + 1.0 + 10.0 + 4.0 + self.footer_height();
+        let height = match (self.body_height, &m.phase) {
+            (Some(body), _) => chrome + body,
+            (None, Phase::Thinking) => chrome + 21.0,
+            (None, Phase::Error(e)) => chrome + 21.0 + 22.0 * (e.chars().count() as f32 / 52.0).ceil().max(1.0),
+            (None, _) if !m.answer.is_empty() => estimate_height(&markdown::parse(&m.answer), !m.question.is_empty(), EXPANDED_WIDTH),
+            (None, _) => chrome + 21.0,
         };
         (EXPANDED_WIDTH, height.min(MAX_HEIGHT))
+    }
+
+    fn shows_footer(&self) -> bool {
+        !self.machine.answer.is_empty() || matches!(self.machine.phase, Phase::Error(_))
+    }
+
+    fn footer_height(&self) -> f32 {
+        if self.shows_footer() { 30.0 } else { 8.0 }
     }
 
     /// The pill's size at this moment (220 ms morph).
@@ -558,13 +565,13 @@ impl Overlay {
         let expanded = h > COMPACT.1 + 8.0;
         if expanded {
             if let Some(body) = self.body() {
-                let room = (h - COMPACT.1 - 1.0 - 10.0 - 4.0 - 30.0).max(0.0);
+                let room = (h - COMPACT.1 - 1.0 - 10.0 - 4.0 - self.footer_height()).max(0.0);
                 content = content
                     .push(container(cosmic::widget::divider::horizontal::light()).padding([0, 12]))
                     .push(space::vertical().height(Length::Fixed(10.0)))
                     .push(container(body).max_height(room))
                     .push(space::vertical().height(Length::Fill));
-                if !self.machine.answer.is_empty() || matches!(self.machine.phase, Phase::Error(_)) {
+                if self.shows_footer() {
                     content = content.push(self.footer());
                 }
             }
