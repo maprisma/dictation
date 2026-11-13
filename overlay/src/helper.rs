@@ -264,8 +264,8 @@ To propose them, end your answer with ONE fenced code block whose info string is
 {\"kind\": \"run_command\", \"argv\": [\"program\", \"arg\"], \"why\": \"<short reason>\"}   (no shell; runs in the home folder only after the user presses Enter; \
 only for what the kinds above can't do; sudo, packages, deleting files, autostart and secrets are always refused)\n\
 Use no other kinds or fields. Propose actions only when the user asks for something to be done or for the weather; otherwise just answer. \
-Keep the text short and say what is about to happen (\"Opening Firefox.\"), never claim a result you cannot know, and never make up weather numbers: \
-the card shows them. If no action fits, say how the user can do it.";
+Keep the text short and say what is about to happen (\"Opening Firefox.\"), never claim a result you cannot know. \
+For the weather write no text, or only a few words: the card shows the place and the numbers; never make them up. If no action fits, say how the user can do it.";
 
 /// The question with a short preamble: who the helper is here, the language, what it may do
 /// (the actions block, or answers only), and the last exchange when this is a follow-up.

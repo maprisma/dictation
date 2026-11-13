@@ -522,7 +522,7 @@ impl Overlay {
             (true, false) => context,
             (false, false) => format!("{}\n\n{context}", self.shown),
         };
-        let e = Exchange { question: self.machine.question.clone(), answer, tainted: self.turn.read_outside() || self.tainted, at: crate::last::now() };
+        let e = Exchange { question: self.machine.question.clone(), answer, tainted: self.turn.read_outside() || policy::looks_pasted(&self.machine.question), at: crate::last::now() };
         if self.last.as_ref() != Some(&e) {
             crate::last::save(&e);
             self.last = Some(e);
@@ -842,7 +842,10 @@ fn weather_view(w: &actions::weather::Weather) -> Element<'static, Message> {
     if let Some(r) = w.rain_chance {
         today.push(trf("Rain {0} %", &[&r.to_string()]));
     }
-    let place = if w.place.region.is_empty() { w.place.name.clone() } else { format!("{}, {}", w.place.name, w.place.region) };
+    let mut place_lines = column![text::heading(w.place.name.clone())].spacing(0).align_x(cosmic::iced::Alignment::End);
+    if !w.place.region.is_empty() {
+        place_lines = place_lines.push(text::caption(w.place.region.clone()).class(theme::Text::Custom(dim_text)));
+    }
     let now = row![
         icon_of(w.code, w.day, 40),
         column![
@@ -852,7 +855,7 @@ fn weather_view(w: &actions::weather::Weather) -> Element<'static, Message> {
         .spacing(0),
         space::horizontal().width(Length::Fill),
         column![
-            text::heading(place).align_x(cosmic::iced::alignment::Horizontal::Right),
+            place_lines,
             text::caption(details.join(" · ")).class(theme::Text::Custom(dim_text)),
             text::caption(today.join(" · ")).class(theme::Text::Custom(dim_text)),
         ]

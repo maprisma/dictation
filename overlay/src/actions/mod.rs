@@ -378,4 +378,33 @@ mod tests {
         assert!(t.context().contains("Weather in Berlin: 8 °C, overcast"));
         assert_eq!(describe(&Action::Volume { percent: None, mute: None, change: Some(-5) }), "Volume -5 %");
     }
+
+    /// Live, by hand: `cargo test -p maprisma-dictation live_ -- --ignored --nocapture`. Asks the
+    /// real shared helper for something that needs a command, checks the card would show (level
+    /// 1), confirms it as Enter would and runs it: `uname -r`, harmless.
+    #[test]
+    #[ignore]
+    fn live_run_command_through_the_helper() {
+        let installed = crate::helper::installed();
+        let chosen = crate::helper::choose("auto", &installed).expect("an installed helper");
+        let prompt = crate::helper::build_prompt("Which kernel version am I running? Check it with uname -r.", None, "en", "Hyprland", true);
+        let argv = crate::helper::ask_argv(&chosen, &prompt);
+        let work = std::env::temp_dir();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let answer = runtime.block_on(crate::helper::run(argv, chosen.installed.helper.stdin.then(|| prompt.clone()), work, crate::helper::TIMEOUT)).unwrap();
+        println!("helper ({}): {answer}", chosen.installed.helper.name);
+        let s = schema::split(&answer);
+        let mut t = Turn::new("kernel", &s, false, false, 0);
+        let i = match t.advance() {
+            Next::Confirm(i) => i,
+            other => panic!("expected a card, got {other:?}: {:?}", t.items),
+        };
+        assert!(matches!(&t.items[i].action, Some(Action::RunCommand { argv, .. }) if argv[0] == "uname"));
+        assert_eq!(t.confirm(), Some(i));
+        let ctx = exec::Context { desktop: crate::look::Desktop::Other, language: "en".into(), weather_location: String::new() };
+        let outcome = exec::execute(t.items[i].action.as_ref().unwrap(), &t.items[i].target, &ctx);
+        let expected = String::from_utf8(std::process::Command::new("uname").arg("-r").output().unwrap().stdout).unwrap();
+        println!("ran: {outcome:?}");
+        assert!(matches!(&outcome, Outcome::Output { ok: true, output, .. } if output.trim() == expected.trim()));
+    }
 }

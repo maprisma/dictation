@@ -76,15 +76,9 @@ pub fn parse_place(json: &[u8]) -> Option<Place> {
     let r = v["results"].as_array()?.first()?;
     let latitude = r["latitude"].as_f64().filter(|l| (-90.0..=90.0).contains(l))?;
     let longitude = r["longitude"].as_f64().filter(|l| (-180.0..=180.0).contains(l))?;
-    let mut region: Vec<String> = vec![];
-    for k in ["admin1", "country"] {
-        if let Some(s) = r[k].as_str().filter(|s| !s.is_empty()) {
-            if !region.iter().any(|x| x == s) && r["name"].as_str() != Some(s) {
-                region.push(short(s, 60));
-            }
-        }
-    }
-    Some(Place { name: short(r["name"].as_str()?, 80), region: region.join(", "), latitude, longitude })
+    // The country is enough to tell places apart on a small card.
+    let region = r["country"].as_str().filter(|c| Some(*c) != r["name"].as_str()).map(|c| short(c, 60)).unwrap_or_default();
+    Some(Place { name: short(r["name"].as_str()?, 80), region, latitude, longitude })
 }
 
 pub fn parse_forecast(json: &[u8], place: Place) -> Option<Weather> {
