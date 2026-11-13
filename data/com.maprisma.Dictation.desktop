@@ -1,0 +1,25 @@
+[Desktop Entry]
+Name=Maprisma Dictation
+Comment=Speak or type a question; the AI helper answers in a small overlay
+Type=Application
+Exec=maprisma-dictation --toggle
+Icon=com.maprisma.Dictation
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+Categories=Utility;Accessibility;
+Keywords=voice;dictation;assistant;AI;speech;
+Name[de]=Maprisma Diktieren
+Comment[de]=Frage sprechen oder tippen; der KI-Helfer antwortet in einem kleinen Fenster
+Name[fr]=Maprisma Dictée
+Comment[fr]=Dites ou tapez une question ; l'assistant IA répond dans une petite fenêtre
+Name[es]=Maprisma Dictado
+Comment[es]=Di o escribe una pregunta; el asistente de IA responde en una pequeña ventana
+Name[it]=Maprisma Dettatura
+Comment[it]=Pronuncia o scrivi una domanda; l'assistente IA risponde in una piccola finestra
+Name[pt]=Maprisma Ditado
+Comment[pt]=Diga ou escreva uma pergunta; o assistente de IA responde numa pequena janela
+Name[nl]=Maprisma Dicteren
+Comment[nl]=Spreek of typ een vraag; de AI-helper antwoordt in een klein venster
+Name[pl]=Maprisma Dyktowanie
+Comment[pl]=Powiedz lub wpisz pytanie; asystent AI odpowiada w małym oknie
