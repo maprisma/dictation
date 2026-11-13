@@ -522,7 +522,7 @@ impl Overlay {
             (true, false) => context,
             (false, false) => format!("{}\n\n{context}", self.shown),
         };
-        let e = Exchange { question: self.machine.question.clone(), answer, tainted: self.turn.read_outside() || policy::looks_pasted(&self.machine.question), at: crate::last::now() };
+        let e = Exchange { question: self.machine.question.clone(), answer, tainted: self.turn.taints_follow_up(self.tainted, &self.machine.question), at: crate::last::now() };
         if self.last.as_ref() != Some(&e) {
             crate::last::save(&e);
             self.last = Some(e);

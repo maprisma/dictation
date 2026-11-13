@@ -4,8 +4,8 @@
 //! - level 2 never runs: packages, sudo/pkexec, deleting outside the trash, autostart and shell
 //!   profiles, secrets. `run_command`'s argv is checked for all of these too.
 //!
-//! A tainted turn (outside text came in: a weather result in the follow-up's context, or
-//! pasted text) and everything after a weather lookup in the same answer need Enter as well;
+//! A tainted turn (outside text came in: a weather result or command output in the follow-up's
+//! context, an earlier tainted exchange in the chain, or pasted text) and everything after a weather lookup in the same answer need Enter as well;
 //! `confirm_all` makes every action wait for Enter (read-only weather lookups excepted).
 
 use super::schema::Action;

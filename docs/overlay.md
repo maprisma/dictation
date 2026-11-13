@@ -144,8 +144,9 @@ is not simple, and `run_command` with Enter covers the rare need.
   `rebase --exec`, `submodule foreach`, `bisect run`, `ext::` URLs, `git config` of aliases,
   `core.*`, helpers or pagers; `make`/`just`, which run the recipes they find …).
 - **Outside text taints**: when the request is a follow-up of an answer that read outside text (a
-  weather result) or looks pasted (more than two lines or 600 characters), its level-0 actions
-  need Enter too; so does every level-0 action after a weather lookup in the same answer.
+  weather result or a `run_command`'s output) or looks pasted (more than two lines or 600
+  characters), its level-0 actions need Enter too. The taint stays for the whole follow-up chain:
+  a follow-up of a tainted exchange is tainted itself, even when it read nothing new; so does every level-0 action after a weather lookup in the same answer.
   `confirm_all` makes every action (except the read-only weather) wait for Enter.
 
 Actions run one at a time, in order. The helper's follow-up sees what they did.
