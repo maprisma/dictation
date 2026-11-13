@@ -87,8 +87,9 @@ Copilot, Grok, Hermes, omp, OpenClaw, pi); `pi:<provider>/<model>` runs pi with 
   Plasma, Hyprland); answer briefly in the user's language", plus the actions schema below
   (`helper::ACTIONS_PREAMBLE`; with `actions: false`: "you cannot act on the desktop").
 - It runs in `$XDG_RUNTIME_DIR/maprisma-dictation/work` in its own process group, with
-  `NO_COLOR=1`; output is cut at 256 KiB and the run at 4 minutes. Esc, or closing the overlay, stops
-  the whole group.
+  `NO_COLOR=1`; output is cut at 256 KiB and the run at 4 minutes. Esc, closing the overlay, the time
+  limit and the helper's own end stop the whole group: SIGTERM, then SIGKILL after 2 s for anything
+  still in it (the overlay waits for that before it exits).
 - The last exchange is kept in `$XDG_RUNTIME_DIR/maprisma-dictation/last.json` (0600, deleted when
   older than 45 s, gone at logout), with what its actions did (so "and tomorrow?" after a weather
   card has the numbers) and whether it read outside text. Besides that, only the action log is
@@ -115,7 +116,7 @@ text and is never read aloud.
 | `move_window` | `workspace` 1–20 | 0 | moves the active window (per desktop) | Hyprland: back |
 | `weather` | `location` (may be empty) | 0, read-only | Open-Meteo, no key: geocoding, then the forecast, with `curl` (argv, https only, 8 s and 512 KiB each); a card with the temperature, conditions, feels-like, wind, today's high/low and rain chance, and the next 6 hours, in the overlay's language | – |
 | `close_window` | – | 1 | closes the active window (the card names it on Hyprland) | – |
-| `run_command` | `argv` (1–32 strings, 4 KiB), `why` | 1 (or 2) | the card shows the argv in monospace; Enter runs it **without a shell**, in `$HOME`, stdin closed, its own process group killed after 60 s, output kept up to 16 KiB and shown | – |
+| `run_command` | `argv` (1–32 strings, 4 KiB), `why` | 1 (or 2) | the card shows the argv in monospace; Enter runs it **without a shell**, in `$HOME`, stdin closed, its own process group killed after 60 s; when the program ends, what it left running in its group is stopped too (SIGTERM, SIGKILL after 0.5 s; something that left the group with `setsid` can't be followed), output kept up to 16 KiB and shown | – |
 
 `write_file` and `move_file` are left out: doing them safely (paths, overwrites, the trash, Undo)
 is not simple, and `run_command` with Enter covers the rare need.

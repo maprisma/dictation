@@ -968,14 +968,30 @@ fn ui_language(setting: &str) -> String {
     maprisma_voice::i18n::system_language([&values[0], &values[1], &values[2]]).to_string()
 }
 
+/// Stops the helper's whole process group: SIGTERM now, SIGKILL after 2 s for whatever is still
+/// in it (a descendant that ignores SIGTERM), on a thread of its own so the UI never waits.
 fn kill_helper() {
     let group = HELPER_GROUP.swap(0, Ordering::SeqCst);
     if group > 0 {
-        unsafe {
-            libc::kill(-group, libc::SIGTERM);
+        if let Ok(handle) = std::thread::Builder::new().name("helper-kill".into()).spawn(move || crate::procgroup::terminate(group, HELPER_GRACE)) {
+            HELPER_KILLS.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
         }
     }
 }
+
+static HELPER_KILLS: std::sync::Mutex<Vec<std::thread::JoinHandle<usize>>> = std::sync::Mutex::new(Vec::new());
+
+/// When the overlay ends: the helper is stopped and every pending SIGKILL is carried out
+/// before the process goes (else a TERM-ignoring descendant would survive the overlay).
+pub fn finish_helper_kills() {
+    kill_helper();
+    let handles = std::mem::take(&mut *HELPER_KILLS.lock().unwrap_or_else(|e| e.into_inner()));
+    for h in handles {
+        let _ = h.join();
+    }
+}
+
+const HELPER_GRACE: Duration = Duration::from_secs(2);
 
 /// [helper::run] in its own process group, so a cancel stops everything it started.
 async fn run_helper(argv: Vec<String>, stdin: Option<String>, work: std::path::PathBuf) -> Result<String, String> {
@@ -1519,6 +1535,30 @@ impl cosmic::Application for Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Esc/close stops the helper's whole group, also a descendant that ignores SIGTERM.
+    #[test]
+    fn helper_group_is_killed() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sh").args(["-c", "trap '' TERM; sleep 30 & wait"]).process_group(0).spawn().unwrap();
+        let group = child.id() as i32;
+        let until = Instant::now() + Duration::from_secs(3);
+        while crate::procgroup::members(group).len() < 2 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(crate::procgroup::members(group).len(), 2);
+        HELPER_GROUP.store(group, Ordering::SeqCst);
+        let started = Instant::now();
+        finish_helper_kills();
+        assert!(started.elapsed() < HELPER_GRACE + Duration::from_secs(1));
+        let _ = child.wait();
+        let until = Instant::now() + Duration::from_secs(2);
+        while !crate::procgroup::members(group).is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(crate::procgroup::members(group).is_empty());
+        assert_eq!(HELPER_GROUP.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn heights_grow_with_the_answer_and_stop_at_the_maximum() {

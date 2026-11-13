@@ -60,7 +60,9 @@ pub struct Ran {
     pub timed_out: bool,
 }
 
-/// Runs argv (no shell) in its own process group; the group is killed after `timeout`.
+/// Runs argv (no shell) in its own process group; the group is killed after `timeout`. When
+/// the program itself ends, whatever it left running in its group is stopped too (SIGTERM, then
+/// SIGKILL), and the output readers are closed: nothing outlives the action.
 pub fn run_capture(argv: &[String], timeout: Duration, cwd: Option<&std::path::Path>) -> std::io::Result<Ran> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).env("NO_COLOR", "1").process_group(0);
@@ -75,58 +77,97 @@ pub fn run_capture(argv: &[String], timeout: Duration, cwd: Option<&std::path::P
     let err_thread = read_bounded(err);
     let started = Instant::now();
     let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+    // The leader is only reaped after the group is cleaned up: until then its pid (= the group
+    // id) can't be reused, so the group signals never hit anyone else.
+    loop {
+        if exited(pid) {
+            break;
         }
         if started.elapsed() >= timeout {
             timed_out = true;
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
-            break child.wait()?;
+            break;
         }
         std::thread::sleep(Duration::from_millis(20));
-    };
-    // Something the program started in the background may keep the pipes open: wait a moment, not forever.
-    let stdout = out_thread.take(Duration::from_secs(1));
+    }
+    if !timed_out {
+        // Output still coming from what it started: a short moment to finish, then it is stopped.
+        let _ = out_thread.wait(Duration::from_millis(300));
+    }
+    crate::procgroup::terminate(pid, Duration::from_millis(500));
+    let status = child.wait()?;
+    let stdout = out_thread.take(Duration::from_millis(500));
     let stderr = err_thread.take(Duration::from_millis(200));
     Ok(Ran { ok: status.success() && !timed_out, stdout, stderr, timed_out })
 }
 
+/// Whether child `pid` has exited, without reaping it (`WNOWAIT`).
+fn exited(pid: i32) -> bool {
+    // SAFETY: waitid on our own child with a zeroed siginfo it fills.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let r = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
+        r == 0 && info.si_pid() != 0 || r != 0
+    }
+}
+
 /// Reads up to OUTPUT_MAX bytes on a thread; [Bounded::take] gives what came (waiting at most
-/// `wait` for the end).
+/// `wait` for the end) and makes the thread let go of the pipe.
 struct Bounded {
     kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     done: std::sync::mpsc::Receiver<()>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ended: std::cell::Cell<bool>,
 }
 
 impl Bounded {
+    /// Whether the pipe ended within `wait`.
+    fn wait(&self, wait: Duration) -> bool {
+        if !self.ended.get() && self.done.recv_timeout(wait).is_ok() {
+            self.ended.set(true);
+        }
+        self.ended.get()
+    }
+
     fn take(self, wait: Duration) -> String {
-        let _ = self.done.recv_timeout(wait);
+        self.wait(wait);
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let kept = self.kept.lock().map(|k| k.clone()).unwrap_or_default();
         String::from_utf8_lossy(&kept).into_owned()
     }
 }
 
-fn read_bounded(mut r: impl Read + Send + 'static) -> Bounded {
+fn read_bounded<R: Read + std::os::fd::AsRawFd + Send + 'static>(mut r: R) -> Bounded {
     let (sender, done) = std::sync::mpsc::channel();
     let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let shared = kept.clone();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (shared, stopped) = (kept.clone(), stop.clone());
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
-        while let Ok(n) = r.read(&mut buf) {
-            if n == 0 {
-                break;
+        // Polled, so `take` can end it even when something escaped the group keeps the pipe open.
+        while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            let mut fd = libc::pollfd { fd: r.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one valid pollfd for an fd this thread owns.
+            if unsafe { libc::poll(&mut fd, 1, 100) } <= 0 {
+                continue;
             }
-            if let Ok(mut k) = shared.lock() {
-                let room = OUTPUT_MAX.saturating_sub(k.len());
-                k.extend_from_slice(&buf[..n.min(room)]);
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Ok(mut k) = shared.lock() {
+                        let room = OUTPUT_MAX.saturating_sub(k.len());
+                        k.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
             }
         }
         let _ = sender.send(());
     });
-    Bounded { kept, done }
+    Bounded { kept, done, stop, ended: std::cell::Cell::new(false) }
 }
 
 /// Starts argv in a session of its own (it outlives the overlay); waits up to `wait` for it to
@@ -466,6 +507,35 @@ mod tests {
         let started = Instant::now();
         assert!(spawn_detached(&["sh".into(), "-c".into(), "sleep 3 & echo started >&2".into()], Duration::from_secs(2)).is_ok());
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    fn alive(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z'))
+    }
+
+    /// What the program leaves running in its group ends with it, even when it ignores SIGTERM
+    /// and keeps the output pipe open.
+    #[test]
+    fn background_descendants_end_with_the_action() {
+        let started = Instant::now();
+        let r = run_capture(&["sh".into(), "-c".into(), "sleep 30 & echo $!".into()], Duration::from_secs(10), None).unwrap();
+        assert!(r.ok && started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        let pid: i32 = r.stdout.trim().parse().unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while alive(pid) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(pid), "the background sleep still runs");
+        // ignores SIGTERM and keeps stdout open: killed after the grace period
+        let started = Instant::now();
+        let r = run_capture(&["sh".into(), "-c".into(), "trap '' TERM; sleep 30 & echo $!".into()], Duration::from_secs(10), None).unwrap();
+        assert!(r.ok && started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        let pid: i32 = r.stdout.trim().parse().unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while alive(pid) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(pid), "the TERM-ignoring sleep still runs");
     }
 
     #[test]

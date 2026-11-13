@@ -12,6 +12,7 @@ pub mod last;
 pub mod look;
 pub mod markdown;
 pub mod paths;
+pub mod procgroup;
 pub mod settings;
 pub mod shared_ai;
 pub mod shot;

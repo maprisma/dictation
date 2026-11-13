@@ -65,6 +65,7 @@ fn main() -> cosmic::iced::Result {
         }
     };
     let result = cosmic::app::run::<ui::Overlay>(cosmic::app::Settings::default().no_main_window(true).transparent(true).exit_on_close(false), flags);
+    ui::finish_helper_kills();
     drop(connection);
     result
 }
