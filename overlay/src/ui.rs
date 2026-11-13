@@ -479,8 +479,10 @@ impl Overlay {
             .width(Length::Fill);
         // The voice service's text so far, at 60 %, over the (empty) field.
         let field: Element<Message> = if listening && !m.partial.is_empty() {
-            let partial = text::body(tail(&m.partial, 52)).size(15.0).class(theme::Text::Custom(partial_text));
-            cosmic::iced::widget::stack![input, container(partial).padding([0, 8]).height(Length::Fill).align_y(cosmic::iced::Alignment::Center)].into()
+            // One line: the newest words, the start scrolls away.
+            let room = if self.size_to.0 > COMPACT.0 { 44 } else { 32 };
+            let partial = text::body(tail(&m.partial, room)).size(15.0).wrapping(cosmic::iced::widget::text::Wrapping::None).class(theme::Text::Custom(partial_text));
+            cosmic::iced::widget::stack![input, container(partial).padding([0, 8]).width(Length::Fill).height(Length::Fill).clip(true).align_y(cosmic::iced::Alignment::Center)].into()
         } else {
             input.into()
         };
@@ -529,7 +531,9 @@ impl Overlay {
         let measured = cosmic::iced::widget::sensor(container(col).padding([0, 20, 4, 16]).width(Length::Fixed(self.size_to.0)))
             .on_show(Message::BodySize)
             .on_resize(Message::BodySize);
-        any.then(|| scrollable(measured).height(Length::Fill).into())
+        // Shrink (not Fill): the sensor then measures the answer itself, not the space it has;
+        // the room it may take is set by pill() (the footer stays visible).
+        any.then(|| scrollable(measured).height(Length::Shrink).into())
     }
 
     fn footer(&self) -> Element<'_, Message> {
@@ -554,7 +558,12 @@ impl Overlay {
         let expanded = h > COMPACT.1 + 8.0;
         if expanded {
             if let Some(body) = self.body() {
-                content = content.push(container(cosmic::widget::divider::horizontal::light()).padding([0, 12])).push(space::vertical().height(Length::Fixed(10.0))).push(body);
+                let room = (h - COMPACT.1 - 1.0 - 10.0 - 4.0 - 30.0).max(0.0);
+                content = content
+                    .push(container(cosmic::widget::divider::horizontal::light()).padding([0, 12]))
+                    .push(space::vertical().height(Length::Fixed(10.0)))
+                    .push(container(body).max_height(room))
+                    .push(space::vertical().height(Length::Fill));
                 if !self.machine.answer.is_empty() || matches!(self.machine.phase, Phase::Error(_)) {
                     content = content.push(self.footer());
                 }
