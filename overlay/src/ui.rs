@@ -59,6 +59,8 @@ pub struct Flags {
     pub demo: bool,
     /// `--ask TEXT`: open without listening and send this question at once.
     pub ask: Option<String>,
+    /// `--wake`: the wake phrase opened it; listen until silence, whatever `listen`/`end` say.
+    pub wake: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +227,10 @@ impl Overlay {
         self.output = Some(output);
         let id = window::Id::unique();
         self.surface = Some(id);
-        let listen = if !self.settings.listen && !self.flags.hold {
+        let listen = if self.flags.wake {
+            // Spoken to: always listen, ending on silence (there is no key to release).
+            Some(End::Silence)
+        } else if !self.settings.listen && !self.flags.hold {
             None
         } else if self.flags.hold {
             Some(End::Release)
@@ -1280,6 +1285,10 @@ impl cosmic::Application for Overlay {
             }
             Message::OpenFallback => return self.open(IcedOutput::Active),
             Message::Command(Command::Toggle | Command::Close) => return self.run(vec![Effect::Close]),
+            Message::Command(Command::Wake(rest)) => {
+                let rest = Some(rest).filter(|r| !r.trim().is_empty());
+                return self.handle(Event::Wake { rest });
+            }
             Message::Command(Command::Release) => {
                 let held = self.started.elapsed().as_millis() as u64;
                 return self.handle(Event::Released { held_ms: held });

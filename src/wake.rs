@@ -379,7 +379,7 @@ enum Ended {
     /// A session wants the microphone, an answer is read aloud, the settings changed, shutdown.
     Paused,
     Heard(String),
-    RecorderEnded,
+    RecorderGone,
 }
 
 /// The result of `WakeTest` / `maprisma-voice wake test`.
@@ -550,7 +550,7 @@ impl Wake {
                         eprintln!("maprisma-voice: maprisma-dictation: {e}");
                     }
                 }
-                Ended::RecorderEnded => {
+                Ended::RecorderGone => {
                     self.show(false, "recorder_failed");
                     self.wait_or_stop(self.timing.retry).await;
                 }
@@ -594,7 +594,7 @@ impl Wake {
             }
             tokio::select! {
                 chunk = capture.chunks.recv() => {
-                    let Some(chunk) = chunk else { break Ended::RecorderEnded };
+                    let Some(chunk) = chunk else { break Ended::RecorderGone };
                     if let Some(segment) = segmenter.feed(&chunk) {
                         if job.is_none() { job = Some(start(segment)) } else { waiting = Some(segment) }
                     }

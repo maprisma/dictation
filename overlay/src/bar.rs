@@ -8,6 +8,8 @@
 //!   sound arcs; this is any app's voice session, as only one listens at a time;
 //! - an answer is read aloud (`Speaking`) → filled mic with a dot;
 //! - the overlay is open (`com.maprisma.Dictation` has an owner) → filled mic;
+//! - the wake listener has the microphone open, waiting for the wake phrase (`WakeListening`,
+//!   `Status` → `wake_active`) → mic outline with a ring;
 //! - else the mic outline.
 //!
 //! `Status` is asked only when the voice service already runs (never D-Bus-activated from here):
@@ -30,6 +32,7 @@ pub const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-symbolic";
 pub const ICON_OPEN: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-open-symbolic";
 pub const ICON_LISTENING: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-listening-symbolic";
 pub const ICON_SPEAKING: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-speaking-symbolic";
+pub const ICON_WAKE: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-wake-symbolic";
 
 /// What the voice service does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +51,8 @@ pub struct Shown {
     pub voice: Voice,
     /// An answer is read aloud.
     pub speaking: bool,
+    /// The wake listener has the microphone open (it waits for the wake phrase).
+    pub wake: bool,
 }
 
 /// What arrives from the bus.
@@ -63,8 +68,10 @@ pub enum Event {
     Overlay(bool),
     /// `com.maprisma.Voice1` got or lost its owner.
     Service(bool),
-    /// The answer of `Status`: `state` and `speaking`.
-    Status { state: String, speaking: bool },
+    /// `WakeListening(active)`.
+    Wake(bool),
+    /// The answer of `Status`: `state`, `speaking` and `wake_active`.
+    Status { state: String, speaking: bool, wake: bool },
 }
 
 impl Shown {
@@ -75,14 +82,17 @@ impl Shown {
             Event::Closed => self.voice = Voice::Idle,
             Event::Overlay(open) => self.open = *open,
             Event::Service(true) => {}
+            Event::Wake(active) => self.wake = *active,
             Event::Service(false) => {
                 self.voice = Voice::Idle;
                 self.speaking = false;
+                self.wake = false;
             }
-            Event::Status { state, speaking } => {
+            Event::Status { state, speaking, wake } => {
                 // Status knows only idle, listening and transcribing.
                 self.voice = voice_of(state).unwrap_or(Voice::Idle);
                 self.speaking = *speaking;
+                self.wake = *wake;
             }
         }
     }
@@ -99,6 +109,8 @@ impl Shown {
             ICON_SPEAKING
         } else if self.open {
             ICON_OPEN
+        } else if self.wake {
+            ICON_WAKE
         } else {
             ICON
         }
@@ -111,6 +123,7 @@ impl Shown {
             (Voice::Transcribing, ..) => tr("Transcribing…"),
             (_, true, _) => tr("Reading the answer aloud"),
             (_, _, true) => tr("Dictation is open"),
+            _ if self.wake => tr("Listening for the wake phrase."),
             _ => tr("Click to speak or type a question"),
         }
     }
@@ -200,6 +213,7 @@ pub fn decode(message: &zbus::Message) -> Option<Event> {
         "State" => body.deserialize::<(String, String)>().ok().map(|(_, state)| Event::State(state)),
         "Speaking" => body.deserialize::<(String, String, String)>().ok().map(|(_, state, _)| Event::Speaking(state)),
         "Closed" => body.deserialize::<(String, String)>().ok().map(|_| Event::Closed),
+        "WakeListening" => body.deserialize::<bool>().ok().map(Event::Wake),
         "NameOwnerChanged" => body.deserialize::<(String, String, String)>().ok().and_then(|(name, _, owner)| match name.as_str() {
             OVERLAY_NAME => Some(Event::Overlay(!owner.is_empty())),
             VOICE_NAME => Some(Event::Service(!owner.is_empty())),
@@ -223,7 +237,8 @@ pub fn status_event(map: &HashMap<String, zbus::zvariant::OwnedValue>) -> Event 
     use zbus::zvariant::Value;
     let state = map.get("state").and_then(|v| if let Value::Str(s) = &**v { Some(s.to_string()) } else { None }).unwrap_or_default();
     let speaking = map.get("speaking").is_some_and(|v| matches!(&**v, Value::Bool(true)));
-    Event::Status { state, speaking }
+    let wake = map.get("wake_active").is_some_and(|v| matches!(&**v, Value::Bool(true)));
+    Event::Status { state, speaking, wake }
 }
 
 /// Follows the overlay and the voice service and calls `changed` with each new [Shown] (the
@@ -233,7 +248,7 @@ pub async fn watch(connection: &zbus::Connection, mut changed: impl FnMut(Shown)
     let dbus = zbus::fdo::DBusProxy::new(connection).await?;
     let mut rules = vec![];
     // Not `Level` (20 a second while listening) and not `Partial`.
-    for member in ["State", "Speaking", "Closed"] {
+    for member in ["State", "Speaking", "Closed", "WakeListening"] {
         rules.push(MatchRule::builder().msg_type(Type::Signal).interface(VOICE_INTERFACE)?.path(VOICE_PATH)?.member(member)?.build());
     }
     for name in [OVERLAY_NAME, VOICE_NAME] {
@@ -268,7 +283,7 @@ pub async fn watch(connection: &zbus::Connection, mut changed: impl FnMut(Shown)
                 Some(Err(e)) => return Err(e),
                 None => return Ok(()),
             },
-            _ = check.tick() => if shown.busy() { status(connection, &dbus).await.or(Some(Event::Service(false))) } else { None },
+            _ = check.tick() => if shown.busy() || shown.wake { status(connection, &dbus).await.or(Some(Event::Service(false))) } else { None },
         };
         let Some(event) = event else { continue };
         let before = shown;
@@ -327,12 +342,21 @@ mod tests {
         assert_eq!((gone.voice, gone.speaking, gone.icon()), (Voice::Idle, false, ICON_OPEN));
         assert_eq!(after(&[st("listening"), Event::Service(true)]).voice, Voice::Listening);
         // Status replaces what the signals said.
-        let status = |state: &str, speaking| Event::Status { state: state.into(), speaking };
+        let status = |state: &str, speaking| Event::Status { state: state.into(), speaking, wake: false };
         assert_eq!(after(&[st("listening"), status("idle", true)]).icon(), ICON_SPEAKING);
         assert_eq!(after(&[status("transcribing", false)]).voice, Voice::Transcribing);
         assert_eq!(after(&[st("listening"), status("", false)]).voice, Voice::Idle);
         assert!(after(&[status("listening", false)]).busy());
         assert!(!after(&[Event::Overlay(true)]).busy());
+        // The wake listener: its own icon, below everything else; it never counts as busy.
+        assert_eq!(after(&[Event::Wake(true)]).icon(), ICON_WAKE);
+        assert!(!after(&[Event::Wake(true)]).busy());
+        assert_eq!(after(&[Event::Wake(true), Event::Overlay(true)]).icon(), ICON_OPEN);
+        assert_eq!(after(&[Event::Wake(true), st("listening")]).icon(), ICON_LISTENING);
+        assert_eq!(after(&[Event::Wake(true), Event::Wake(false)]).icon(), ICON);
+        assert_eq!(after(&[Event::Wake(true), Event::Service(false)]).icon(), ICON);
+        assert_eq!(after(&[Event::Status { state: "idle".into(), speaking: false, wake: true }]).icon(), ICON_WAKE);
+        assert_eq!(after(&[Event::Wake(true), status("idle", false)]).icon(), ICON);
     }
 
     #[test]
@@ -343,6 +367,9 @@ mod tests {
         assert_eq!((s.status().as_str(), s.toggle_label().as_str()), ("Click to speak or type a question", "Open dictation"));
         s.open = true;
         assert_eq!((s.status().as_str(), s.toggle_label().as_str()), ("Dictation is open", "Close dictation"));
+        s.open = false;
+        s.wake = true;
+        assert_eq!(s.status(), "Listening for the wake phrase.");
         s.speaking = true;
         assert_eq!(s.status(), "Reading the answer aloud");
         s.voice = Voice::Transcribing;
@@ -414,8 +441,10 @@ mod tests {
         let mut map: HashMap<String, OwnedValue> = HashMap::new();
         map.insert("state".into(), OwnedValue::try_from(Value::from("listening")).unwrap());
         map.insert("speaking".into(), OwnedValue::try_from(Value::from(true)).unwrap());
-        assert_eq!(status_event(&map), Event::Status { state: "listening".into(), speaking: true });
-        assert_eq!(status_event(&HashMap::new()), Event::Status { state: String::new(), speaking: false });
+        assert_eq!(status_event(&map), Event::Status { state: "listening".into(), speaking: true, wake: false });
+        map.insert("wake_active".into(), OwnedValue::try_from(Value::from(true)).unwrap());
+        assert_eq!(status_event(&map), Event::Status { state: "listening".into(), speaking: true, wake: true });
+        assert_eq!(status_event(&HashMap::new()), Event::Status { state: String::new(), speaking: false, wake: false });
     }
 
     #[test]
@@ -467,7 +496,7 @@ mod tests {
         }
         assert!(applet.lines().filter(|l| l.starts_with("Comment[")).count() == 7);
         // Every icon the bar shows ships, symbolic (currentColor + KDE's ColorScheme-Text).
-        for icon in [ICON, ICON_OPEN, ICON_LISTENING, ICON_SPEAKING] {
+        for icon in [ICON, ICON_OPEN, ICON_LISTENING, ICON_SPEAKING, ICON_WAKE] {
             let svg = std::fs::read_to_string(format!("../data/icons/{icon}.svg")).unwrap_or_else(|_| panic!("{icon}"));
             assert!(svg.contains("currentColor") && svg.contains("ColorScheme-Text"), "{icon}");
         }

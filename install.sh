@@ -13,7 +13,7 @@
 #   ~/.local/bin/maprisma-dictation-tray                           the tray icon (KDE Plasma, Hyprland)
 #   ~/.local/share/applications/io.github.ubruckhaus.CosmicMaprismaDictation.desktop   makes it an applet
 #   ~/.config/autostart/io.github.ubruckhaus.CosmicMaprismaDictation.Tray.desktop     the tray on KDE and Hyprland
-#   ~/.local/share/icons/hicolor/scalable/apps/io.github.ubruckhaus.CosmicMaprismaDictation{,-open,-listening,-speaking}-symbolic.svg
+#   ~/.local/share/icons/hicolor/scalable/apps/io.github.ubruckhaus.CosmicMaprismaDictation{,-open,-listening,-speaking,-wake}-symbolic.svg
 # The engine (whisper.cpp's whisper-server) and its models are found in
 # ~/.local/share/maprisma-voice/{whisper.cpp/bin,models}, or on PATH; see README.md.
 #   ~/.local/bin/omarchy-dictation-maprisma, omarchy-install-dictation-maprisma
@@ -33,7 +33,7 @@ icons="$data/icons/hicolor/scalable/apps"
 bar_id=io.github.ubruckhaus.CosmicMaprismaDictation
 applet_desktop="$data/applications/$bar_id.desktop"
 tray_autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/$bar_id.Tray.desktop"
-bar_icons=("$bar_id-symbolic" "$bar_id-open-symbolic" "$bar_id-listening-symbolic" "$bar_id-speaking-symbolic")
+bar_icons=("$bar_id-symbolic" "$bar_id-open-symbolic" "$bar_id-listening-symbolic" "$bar_id-speaking-symbolic" "$bar_id-wake-symbolic")
 
 if [[ ${1:-} == --uninstall ]]; then
     systemctl --user stop maprisma-voice.service 2>/dev/null || true

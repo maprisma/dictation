@@ -56,6 +56,9 @@ pub enum Event {
     ToggleMic,
     /// The voice service started (true) or stopped (false) reading the answer aloud.
     Speaking(bool),
+    /// The wake phrase was heard while the overlay is open: listen again, or ask what was said
+    /// after the phrase.
+    Wake { rest: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +310,19 @@ impl Machine {
                     vec![Effect::FinishVoice]
                 }
             }
+            Event::Wake { rest } => match (&self.phase, rest) {
+                // Busy with a question or already listening: nothing to do.
+                (Phase::Thinking | Phase::Listening | Phase::Transcribing, _) => vec![],
+                (_, Some(rest)) => {
+                    let mut effects = self.stop_voice();
+                    effects.extend(self.ask(rest));
+                    effects
+                }
+                (_, None) => {
+                    self.text.clear();
+                    self.start_voice(End::Silence)
+                }
+            },
             Event::ToggleMic => match self.phase {
                 Phase::Listening | Phase::Transcribing => {
                     // Stop listening and use what was heard.
@@ -504,5 +520,32 @@ mod tests {
         m.handle(Event::Speaking(true));
         m.handle(Event::Speaking(false));
         assert_eq!(m.handle(Event::Escape), vec![Effect::Close]);
+    }
+
+    #[test]
+    fn wake_phrase_while_open() {
+        // Idle or showing an answer: listen again (ending on silence); a speech or card goes.
+        let mut m = Machine::default();
+        assert_eq!(m.handle(Event::Wake { rest: None }), vec![Effect::StartVoice(End::Silence)]);
+        assert_eq!(m.phase, Phase::Listening);
+        let mut m = answered();
+        m.handle(Event::Speaking(true));
+        assert_eq!(m.handle(Event::Wake { rest: None }), vec![Effect::StopSpeaking, Effect::StartVoice(End::Silence)]);
+        // With what was said after the phrase: asked at once.
+        let mut m = answered();
+        assert_eq!(m.handle(Event::Wake { rest: Some("open Firefox".into()) }), vec![Effect::Ask("open Firefox".into())]);
+        assert_eq!((m.phase.clone(), m.question.as_str()), (Phase::Thinking, "open Firefox"));
+        // Typed text is replaced; listening, transcribing or thinking: nothing happens.
+        let mut m = Machine::default();
+        m.handle(Event::Typed("half a quest".into()));
+        assert_eq!(m.handle(Event::Wake { rest: None }), vec![Effect::StartVoice(End::Silence)]);
+        assert!(m.text.is_empty());
+        assert_eq!(m.handle(Event::Wake { rest: Some("x".into()) }), vec![]);
+        m.handle(Event::VoiceState("transcribing".into()));
+        assert_eq!(m.handle(Event::Wake { rest: None }), vec![]);
+        let mut m = Machine::default();
+        m.handle(Event::Typed("q".into()));
+        m.handle(Event::Submit);
+        assert_eq!(m.handle(Event::Wake { rest: None }), vec![]);
     }
 }
