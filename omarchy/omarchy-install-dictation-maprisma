@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# omarchy:summary=Use Maprisma Dictation for Omarchy's dictation keys
+# Selects Maprisma Dictation as Omarchy's dictation backend once its voice service is ready
+# (install it from github.com/maprisma/dictation, or through Maprisma Manager › Voice).
+
+voice=$(command -v maprisma-voice || true)
+[[ -n $voice ]] || voice="$HOME/.local/bin/maprisma-voice"
+if [[ ! -x $voice ]]; then
+  echo "Maprisma Dictation is not installed: see https://github.com/maprisma/dictation" >&2
+  exit 1
+fi
+if ! "$voice" status --json | grep -q '"ready":true'; then
+  echo "Maprisma Dictation is not ready yet:" >&2
+  "$voice" status | grep -E '^(message|why_not)' >&2
+  exit 1
+fi
+if ! command -v wtype >/dev/null; then
+  echo "Note: without wtype the text goes to the clipboard instead of the focused field." >&2
+fi
+exec omarchy-dictation-use maprisma

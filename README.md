@@ -64,6 +64,7 @@ maprisma-voice dictate --seconds 5  # a fixed length
 maprisma-voice transcribe file.wav  # a 16-bit PCM WAV, without the daemon
 maprisma-voice status               # engine, model and why it isn't ready
 maprisma-voice speak "Hallo!"       # read aloud with Kokoro (the Narrator's voice), if installed
+maprisma-voice omarchy toggle       # Omarchy's dictation keys: see docs/omarchy.md
 maprisma-voice set language de      # settings: enabled, engine, model, language, microphone, …
 ```
 

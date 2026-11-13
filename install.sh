@@ -16,6 +16,9 @@
 #   ~/.local/share/icons/hicolor/scalable/apps/io.github.ubruckhaus.CosmicMaprismaDictation{,-open,-listening,-speaking}-symbolic.svg
 # The engine (whisper.cpp's whisper-server) and its models are found in
 # ~/.local/share/maprisma-voice/{whisper.cpp/bin,models}, or on PATH; see README.md.
+#   ~/.local/bin/omarchy-dictation-maprisma, omarchy-install-dictation-maprisma
+#                               Omarchy's dictation keys through this service (docs/omarchy.md);
+#                               harmless elsewhere. Select it on Omarchy: omarchy-install-dictation-maprisma
 #   ./install.sh --uninstall    removes these files again (settings and models stay; a running
 #                               tray or applet keeps running until logout or a panel restart).
 set -euo pipefail
@@ -36,7 +39,8 @@ if [[ ${1:-} == --uninstall ]]; then
     systemctl --user stop maprisma-voice.service 2>/dev/null || true
     rm -f "$bin/maprisma-voice" "$unit" "$activation" "$bin/maprisma-dictation" "$desktop" \
         "$icons/com.maprisma.Dictation.svg" "$icons/com.maprisma.Dictation-symbolic.svg" \
-        "$bin/maprisma-dictation-applet" "$bin/maprisma-dictation-tray" "$applet_desktop" "$tray_autostart"
+        "$bin/maprisma-dictation-applet" "$bin/maprisma-dictation-tray" "$applet_desktop" "$tray_autostart" \
+        "$bin/omarchy-dictation-maprisma" "$bin/omarchy-install-dictation-maprisma"
     for icon in "${bar_icons[@]}"; do rm -f "$icons/$icon.svg"; done
     gtk-update-icon-cache -q -t "$data/icons/hicolor" 2>/dev/null || true
     systemctl --user daemon-reload 2>/dev/null || true
@@ -49,6 +53,11 @@ cargo build --release --workspace
 for program in maprisma-voice maprisma-dictation maprisma-dictation-applet maprisma-dictation-tray; do
     install -Dm755 "target/release/$program" "$bin/.$program.new"
     mv -f "$bin/.$program.new" "$bin/$program"
+done
+
+# Omarchy's dictation backend adapter (only used where Omarchy selects it).
+for script in omarchy-dictation-maprisma omarchy-install-dictation-maprisma; do
+    install -Dm755 "omarchy/$script" "$bin/$script"
 done
 
 # The overlay's launcher entry (hidden: it is opened by a key) and icons.

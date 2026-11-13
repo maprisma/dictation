@@ -10,6 +10,7 @@ pub mod engines;
 pub mod http;
 pub mod i18n;
 pub mod models;
+pub mod omarchy;
 pub mod paths;
 pub mod procs;
 pub mod recorder;

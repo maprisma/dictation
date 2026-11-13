@@ -18,6 +18,7 @@ const USAGE: &str = "maprisma-voice — the Maprisma voice service
   maprisma-voice status [--json]              engine, model, language and why it is not ready
   maprisma-voice models [--json]              catalog and installed models
   maprisma-voice model download|remove NAME   a catalog model (base, small, large-v3-turbo)
+  maprisma-voice omarchy start|stop|toggle   Omarchy's dictation keys (omarchy-dictation-maprisma)
   maprisma-voice get [KEY]                    settings (JSON)
   maprisma-voice set KEY VALUE                one setting; VALUE is JSON or a plain string
   maprisma-voice unset KEY                    back to the default
@@ -45,6 +46,16 @@ fn main() -> ExitCode {
             let (text, language) = (args[1].clone(), value_of(&args[1..], "--language").map(str::to_string));
             runtime(async move { client::speak(&text, language.as_deref()).await })
         }
+        Some("omarchy") => match args.get(1).map(String::as_str) {
+            Some("start") => maprisma_voice::omarchy::start(&dirs),
+            Some("stop") => maprisma_voice::omarchy::stop(&dirs),
+            Some("toggle") => maprisma_voice::omarchy::toggle(&dirs),
+            _ => {
+                eprintln!("usage: maprisma-voice omarchy <start|stop|toggle>");
+                2
+            }
+        },
+        Some("omarchy-run") => runtime(maprisma_voice::omarchy::run(dirs)),
         Some("models") => {
             let listing = models::listing(&dirs, &settings::load(&dirs).model);
             if args.iter().any(|a| a == "--json") {

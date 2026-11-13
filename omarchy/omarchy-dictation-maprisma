@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# omarchy:summary=Record dictation using Maprisma Dictation
+# omarchy:args=<start|stop|toggle>
+
+# Omarchy's dictation backend contract (manual: Text Extraction & Dictation): start, stop and
+# toggle return at once; stop succeeds when idle or when Maprisma Dictation is missing.
+case "${1:-}" in
+  start|stop|toggle) ;;
+  *) echo "Usage: omarchy dictation maprisma <start|stop|toggle>" >&2; exit 1 ;;
+esac
+
+voice=$(command -v maprisma-voice || true)
+[[ -n $voice ]] || voice="$HOME/.local/bin/maprisma-voice"
+if [[ ! -x $voice ]]; then
+  [[ $1 == stop ]] && exit 0
+  echo "Maprisma Dictation (maprisma-voice) is not installed." >&2
+  exit 1
+fi
+exec "$voice" omarchy "$1"
