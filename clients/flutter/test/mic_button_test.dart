@@ -6,17 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:APP/mic_button.dart';
-import 'package:APP/voice_input.dart';
 
 import 'voice_fake.dart';
-
-/// Lets the fake program run: real time (its I/O) and frames (the widget's microtasks) in turn.
-Future<void> settle(WidgetTester tester, [int ms = 600]) async {
-  for (var i = 0; i < ms ~/ 20; i++) {
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
-    await tester.pump(const Duration(milliseconds: 20));
-  }
-}
 
 void main() {
   group('insertDictatedText', () {

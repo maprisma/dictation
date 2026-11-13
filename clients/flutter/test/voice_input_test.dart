@@ -147,6 +147,13 @@ void main() {
     });
   });
 
+  test('under flutter test the real service is never used without an environment', () async {
+    VoiceInput.environment = null;
+    VoiceInput.forget();
+    expect(VoiceInput.executable(), isNull);
+    expect((await VoiceInput.available()).installed, isFalse);
+  });
+
   test('missing program: start throws', () async {
     VoiceInput.environment = {'HOME': '/nonexistent', 'PATH': '/nonexistent'};
     addTearDown(() => VoiceInput.environment = null);

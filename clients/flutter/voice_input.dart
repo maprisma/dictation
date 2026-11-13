@@ -182,7 +182,8 @@ final class VoiceLineSplitter extends StreamTransformerBase<List<int>, String> {
 
 /// Finding and asking the service.
 abstract final class VoiceInput {
-  /// Tests: the environment used to find the program (HOME, PATH) and given to it.
+  /// Tests: the environment used to find the program (HOME, PATH) and given to it. Under
+  /// `flutter test` (FLUTTER_TEST=true) the real service is never used unless this is set.
   static Map<String, String>? environment;
 
   /// How long an answer of [available] is reused.
@@ -208,6 +209,7 @@ abstract final class VoiceInput {
 
   /// `~/.local/bin/maprisma-voice`, else the first one on PATH; null when there is none.
   static String? executable() {
+    if (environment == null && Platform.environment['FLUTTER_TEST'] == 'true') return null;
     final env = _env;
     final home = env['HOME'] ?? '';
     final candidates = <String>[
