@@ -19,6 +19,8 @@ const USAGE: &str = "maprisma-voice — the Maprisma voice service
   maprisma-voice models [--json]              catalog and installed models
   maprisma-voice model download|remove NAME   a catalog model (base, small, large-v3-turbo)
   maprisma-voice omarchy start|stop|toggle   Omarchy's dictation keys (omarchy-dictation-maprisma)
+  maprisma-voice wake test [--seconds N] [--json]
+                                              listen once (N ≤ 10 s) for the wake phrase: what was heard, the score
   maprisma-voice get [KEY]                    settings (JSON)
   maprisma-voice set KEY VALUE                one setting; VALUE is JSON or a plain string
   maprisma-voice unset KEY                    back to the default
@@ -66,6 +68,18 @@ fn main() -> ExitCode {
             0
         }
         Some("model") => model(&dirs, &args[1..]),
+        Some("wake") if args.get(1).map(String::as_str) == Some("test") => {
+            let seconds = match value_of(&args[1..], "--seconds").map(str::parse::<u32>) {
+                None => 10,
+                Some(Ok(s)) if (1..=10).contains(&s) => s,
+                Some(_) => {
+                    eprintln!("--seconds: 1 to 10");
+                    return ExitCode::from(2);
+                }
+            };
+            let json = args.iter().any(|a| a == "--json");
+            runtime(async move { client::wake_test(seconds, json).await })
+        }
         Some("get") => {
             let value = settings::read_value(&dirs);
             match args.get(1) {

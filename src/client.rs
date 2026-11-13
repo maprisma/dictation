@@ -259,3 +259,53 @@ pub async fn speak(text: &str, language: Option<&str>) -> i32 {
         }
     }
 }
+
+/// `wake test`: the daemon listens once for the wake phrase (`WakeTest`) and this prints what it
+/// heard. Exit codes: 0 it matches, 1 it doesn't (or failed), 3 no speech, 4 service missing.
+pub async fn wake_test(seconds: u32, json: bool) -> i32 {
+    let connection = match zbus::Connection::session().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{} ({e})", tr("The voice service is not running."));
+            return 4;
+        }
+    };
+    if !json {
+        let phrase = crate::settings::load(&crate::paths::Dirs::from_env()).wake_phrase;
+        eprintln!("{}", trf("Say “{0}” now…", &[&phrase]));
+    }
+    // Loading the recogniser's model may take a while the first time.
+    let body = (seconds,);
+    let call = connection.call_method(Some(NAME), PATH, Some(INTERFACE), "WakeTest", &body);
+    let reply = match tokio::time::timeout(Duration::from_secs(u64::from(seconds) + 120), call).await {
+        Err(_) => {
+            eprintln!("timed out");
+            return 1;
+        }
+        Ok(Err(e)) => {
+            eprintln!("{}", dbus_message(&e));
+            return if matches!(e, zbus::Error::MethodError(ref n, ..) if n.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown") { 4 } else { 1 };
+        }
+        Ok(Ok(r)) => r,
+    };
+    let Ok(map) = reply.body().deserialize::<HashMap<String, OwnedValue>>() else { return 1 };
+    let map: serde_json::Map<String, serde_json::Value> = map.iter().map(|(k, v)| (k.clone(), crate::dbus::value_to_json(v))).collect();
+    let matched = map.get("matched").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let speech = map.get("speech").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    if json {
+        println!("{}", serde_json::Value::Object(map));
+    } else if !speech {
+        eprintln!("{}", tr("No speech was heard."));
+    } else {
+        let text = |k: &str| map.get(k).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        let number = |k: &str| map.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        println!("{}", trf("Heard: {0}", &[&text("heard")]));
+        let (score, needed) = (format!("{:.2}", number("score")), format!("{:.2}", number("needed")));
+        println!("{}", trf("Score {0} (a match needs {1})", &[&score, &needed]));
+        println!("{}", if matched { tr("It matches the wake phrase.") } else { tr("It does not match the wake phrase.") });
+        if !text("rest").is_empty() {
+            println!("{}", trf("Request after it: {0}", &[&text("rest")]));
+        }
+    }
+    if !speech { 3 } else if matched { 0 } else { 1 }
+}

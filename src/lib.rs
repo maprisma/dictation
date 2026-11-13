@@ -19,6 +19,7 @@ pub mod settings;
 pub mod speech;
 pub mod tempwav;
 pub mod vad;
+pub mod wake;
 
 /// An error with a stable code (the D-Bus error name's last part, see docs/protocol.md) and a
 /// message for people.

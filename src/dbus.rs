@@ -104,6 +104,25 @@ pub fn value_to_json(v: &Value<'_>) -> serde_json::Value {
 pub struct Voice {
     pub core: Arc<Core>,
     pub speech: Arc<crate::speech::Speech>,
+    pub wake: Arc<crate::wake::Wake>,
+}
+
+/// `WakeTest`'s answer.
+pub fn wake_test_map(r: &crate::wake::TestResult) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("heard".into(), r.heard.clone().into());
+    m.insert("matched".into(), r.matched.into());
+    m.insert("score".into(), r.score.into());
+    m.insert("needed".into(), r.needed.into());
+    m.insert("rest".into(), r.rest.clone().into());
+    m.insert("phrase".into(), r.phrase.clone().into());
+    m.insert("model".into(), r.model.clone().into());
+    m.insert("speech".into(), r.speech.into());
+    m
+}
+
+fn to_dbus(map: &serde_json::Map<String, serde_json::Value>) -> HashMap<String, OwnedValue> {
+    map.iter().filter_map(|(k, v)| OwnedValue::try_from(json_to_value(v)).ok().map(|v| (k.clone(), v))).collect()
 }
 
 #[zbus::interface(name = "com.maprisma.Voice1")]
@@ -137,9 +156,10 @@ impl Voice {
     }
 
     async fn status(&self) -> HashMap<String, OwnedValue> {
-        let (core, speech) = (self.core.clone(), self.speech.clone());
+        let (core, speech, wake) = (self.core.clone(), self.speech.clone(), self.wake.clone());
         let map = tokio::task::spawn_blocking(move || {
             let mut map = core.status();
+            map.extend(wake.status());
             let why = speech.check().err().unwrap_or("");
             map.insert("speech_ready".into(), why.is_empty().into());
             map.insert("speech_why_not".into(), why.into());
@@ -149,8 +169,29 @@ impl Voice {
         })
         .await
         .unwrap_or_default();
-        map.iter().filter_map(|(k, v)| OwnedValue::try_from(json_to_value(v)).ok().map(|v| (k.clone(), v))).collect()
+        to_dbus(&map)
     }
+
+    /// Listens once (1–10 s) for one stretch of speech with the wake recogniser and says what it
+    /// heard: `heard`, `matched`, `score`, `needed`, `rest`, `phrase`, `model`, `speech`.
+    /// Nothing is started on a match. Refused while a session listens.
+    async fn wake_test(&self, seconds: u32) -> Result<HashMap<String, OwnedValue>, DbusError> {
+        if !(1..=10).contains(&seconds) {
+            return Err(DbusError::InvalidArgs("seconds: 1 to 10".into()));
+        }
+        // Listening and speaking never overlap.
+        self.speech.stop();
+        let result = self.wake.test(seconds, std::time::Duration::from_secs(20)).await?;
+        Ok(to_dbus(&wake_test_map(&result)))
+    }
+
+    /// The wake phrase was heard; `rest` is what was said after it (may be empty).
+    #[zbus(signal)]
+    pub async fn wake(emitter: &SignalEmitter<'_>, phrase: &str, rest: &str) -> zbus::Result<()>;
+
+    /// The wake listener opened (true) or closed (false) the microphone.
+    #[zbus(signal)]
+    pub async fn wake_listening(emitter: &SignalEmitter<'_>, active: bool) -> zbus::Result<()>;
 
     /// Reads `text` aloud with Kokoro (options: `language`); returns its id. `Speaking` signals
     /// follow. Stops what was being said; refused while a session listens.
@@ -256,15 +297,30 @@ async fn forward(connection: zbus::Connection, mut events: tokio::sync::mpsc::Un
     }
 }
 
+async fn forward_wake(connection: zbus::Connection, mut events: tokio::sync::mpsc::UnboundedReceiver<crate::wake::WakeEvent>) {
+    let Ok(emitter) = SignalEmitter::new(&connection, PATH) else { return };
+    while let Some(event) = events.recv().await {
+        let result = match &event {
+            crate::wake::WakeEvent::Heard { phrase, rest } => Voice::wake(&emitter, phrase, rest).await,
+            crate::wake::WakeEvent::Listening(active) => Voice::wake_listening(&emitter, *active).await,
+        };
+        if let Err(e) = result {
+            eprintln!("maprisma-voice: signal: {e}");
+        }
+    }
+}
+
 /// `maprisma-voice daemon`: owns the name until SIGTERM/SIGINT or the bus goes away.
 pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
     let (speech_tx, mut speech_rx) = tokio::sync::mpsc::unbounded_channel();
     let speech = crate::speech::Speech::new(dirs.clone(), speech_tx);
     let backend = Arc::new(crate::service::RealBackend::new(dirs));
     let (core, events) = Core::new(backend.clone(), crate::vad::VadConfig::default());
+    let wake_host = Arc::new(crate::wake::RealHost::new(backend.dirs.clone(), speech.clone()));
+    let (wake, wake_events) = crate::wake::Wake::new(wake_host, core.mic.clone(), Default::default(), Default::default());
     let connection = zbus::connection::Builder::session()
         .map_err(|e| e.to_string())?
-        .serve_at(PATH, Voice { core: core.clone(), speech: speech.clone() })
+        .serve_at(PATH, Voice { core: core.clone(), speech: speech.clone(), wake: wake.clone() })
         .map_err(|e| e.to_string())?
         .build()
         .await
@@ -275,6 +331,8 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
         Err(e) => return Err(e.to_string()),
     }
     tokio::spawn(forward(connection.clone(), events));
+    tokio::spawn(forward_wake(connection.clone(), wake_events));
+    let wake_task = tokio::spawn(wake.clone().run());
     let speech_connection = connection.clone();
     tokio::spawn(async move {
         let Ok(emitter) = SignalEmitter::new(&speech_connection, PATH) else { return };
@@ -311,7 +369,12 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
         _ = int.recv() => {}
         _ = lost.next() => {}
     }
-    // Every session first: an external recorder (Voxtype …) must not go on after we're gone.
+    // The wake listener closes the microphone; then every session: an external recorder
+    // (Voxtype …) must not go on after we're gone.
+    wake.shutdown();
+    if tokio::time::timeout(std::time::Duration::from_secs(5), wake_task).await.is_err() {
+        eprintln!("maprisma-voice: the wake listener did not stop in time");
+    }
     if !core.shutdown().await {
         eprintln!("maprisma-voice: a session did not stop in time");
     }
