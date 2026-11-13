@@ -13,6 +13,7 @@ use cosmic::app::{Core, Task};
 use cosmic::applet::cosmic_panel_config::PanelAnchor;
 use cosmic::applet::{menu_button, padded_control};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup;
+use cosmic::iced::widget::svg as iced_svg;
 use cosmic::iced::{Alignment, Length, Rectangle, Subscription, window};
 use cosmic::widget::rectangle_tracker::{RectangleTracker, RectangleUpdate, rectangle_tracker_subscription};
 use cosmic::widget::{Id, autosize, button, column, divider, icon, mouse_area, row, text};
@@ -212,7 +213,14 @@ impl cosmic::Application for Applet {
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
         let size = self.core.applet.suggested_size(true).0;
-        let button = button::custom(icon::from_name(self.shown.icon()).size(size).symbolic(true).icon())
+        let mut bar_icon = icon::from_name(self.shown.icon()).size(size).symbolic(true).icon();
+        if self.shown.active() {
+            // Green while the microphone listens, as every Maprisma bar icon that is on.
+            bar_icon = bar_icon.class(theme::Svg::custom(|theme: &cosmic::Theme| iced_svg::Style {
+                color: Some(theme.cosmic().success_color().into()),
+            }));
+        }
+        let button = button::custom(bar_icon)
             .padding(if horizontal { [0, padding] } else { [padding, 0] })
             .on_press_down(Message::Toggle)
             .class(theme::Button::AppletIcon);

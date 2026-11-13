@@ -30,7 +30,10 @@ pub const SNI_ID: &str = "maprisma-dictation";
 
 pub const ICON: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-symbolic";
 pub const ICON_OPEN: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-open-symbolic";
-pub const ICON_LISTENING: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-listening-symbolic";
+/// The microphone while it listens, in the theme's green (class ColorScheme-PositiveText):
+/// every Maprisma bar icon that is on uses this one colour; Maprisma Shell tints any
+/// -active-symbolic tray icon green, the COSMIC applet draws it in the success colour.
+pub const ICON_LISTENING: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-listening-active-symbolic";
 pub const ICON_SPEAKING: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-speaking-symbolic";
 pub const ICON_WAKE: &str = "io.github.ubruckhaus.CosmicMaprismaDictation-wake-symbolic";
 
@@ -100,6 +103,11 @@ impl Shown {
     /// The voice service is doing something (listening, transcribing or speaking).
     pub fn busy(&self) -> bool {
         self.voice != Voice::Idle || self.speaking
+    }
+
+    /// "On" for the bar: the microphone listens or transcribes (green icon).
+    pub fn active(&self) -> bool {
+        self.voice != Voice::Idle
     }
 
     pub fn icon(&self) -> &'static str {
@@ -319,6 +327,8 @@ mod tests {
         assert_eq!(after(&[]).icon(), ICON);
         assert_eq!(after(&[Event::Overlay(true)]).icon(), ICON_OPEN);
         assert_eq!(after(&[Event::Overlay(true), st("listening")]).icon(), ICON_LISTENING);
+        assert!(after(&[st("listening")]).active());
+        assert!(!after(&[Event::Overlay(true)]).active());
         assert_eq!(after(&[st("listening"), st("transcribing")]).voice, Voice::Transcribing);
         assert_eq!(after(&[st("listening"), st("transcribing")]).icon(), ICON_LISTENING);
         // The end of a session, however it ends.
@@ -495,10 +505,17 @@ mod tests {
             }
         }
         assert!(applet.lines().filter(|l| l.starts_with("Comment[")).count() == 7);
-        // Every icon the bar shows ships, symbolic (currentColor + KDE's ColorScheme-Text).
-        for icon in [ICON, ICON_OPEN, ICON_LISTENING, ICON_SPEAKING, ICON_WAKE] {
+        // Every icon the bar shows ships, symbolic (currentColor + KDE's ColorScheme-Text);
+        // the listening one is "on": green (ColorScheme-PositiveText), named -active-symbolic.
+        for icon in [ICON, ICON_OPEN, ICON_SPEAKING, ICON_WAKE] {
             let svg = std::fs::read_to_string(format!("../data/icons/{icon}.svg")).unwrap_or_else(|_| panic!("{icon}"));
             assert!(svg.contains("currentColor") && svg.contains("ColorScheme-Text"), "{icon}");
         }
+        assert!(ICON_LISTENING.ends_with("-active-symbolic"));
+        let svg = std::fs::read_to_string(format!("../data/icons/{ICON_LISTENING}.svg")).unwrap();
+        assert!(svg.contains("currentColor") && svg.contains(r#"class="ColorScheme-PositiveText""#));
+        assert!(!svg.contains("ColorScheme-Text"));
+        let install = std::fs::read_to_string("../install.sh").unwrap();
+        assert!(install.contains(r#""$bar_id-listening-active-symbolic""#));
     }
 }

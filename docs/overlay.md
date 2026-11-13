@@ -292,7 +292,7 @@ by itself. The icon shows, from the session bus only (nothing is started for it)
 |---|---|
 | mic outline (`…Dictation-symbolic`) | idle |
 | filled mic (`-open-symbolic`) | the overlay is open (`com.maprisma.Dictation` has an owner) |
-| filled mic with sound arcs (`-listening-symbolic`) | maprisma-voice listens or transcribes (`State` signal; any app's session: the mic is on) |
+| filled mic with sound arcs in the theme green (`-listening-active-symbolic`) | maprisma-voice listens or transcribes (`State` signal; any app's session: the mic is on) |
 | filled mic with a dot (`-speaking-symbolic`) | an answer is read aloud (`Speaking`) |
 | mic outline with a ring (`-wake-symbolic`) | the wake listener has the microphone open, waiting for the wake phrase (`WakeListening`, `Status` → `wake_active`); the tooltip says "Listening for the wake phrase." |
 
