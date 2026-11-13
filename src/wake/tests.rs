@@ -455,7 +455,8 @@ async fn cooldown_means_one_wake() {
     next_heard(&mut rx).await;
     // The second one only after the 400 ms cooldown, from a fresh capture.
     assert!(first.elapsed() >= Duration::from_millis(400));
-    assert_eq!(host.launches.lock().unwrap().len(), 2);
+    // `Heard` is sent just before the overlay is launched: wait for the launch, don't race it.
+    until("second launch", || host.launches.lock().unwrap().len() == 2).await;
     assert_eq!(host.opened.load(Ordering::SeqCst), 2);
     wake.shutdown();
 }
