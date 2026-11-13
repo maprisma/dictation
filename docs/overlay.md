@@ -1,14 +1,17 @@
-# Maprisma Dictation: the overlay (step 4)
+# Maprisma Dictation: the overlay (steps 4–6)
 
 `maprisma-dictation` is a small pill at the top centre of the screen. You speak or type a question,
-the AI helper you chose in Maprisma Manager → AI answers, and the answer shows in the pill. In this
-step it only **answers**: it does not act on the desktop yet (that is step 5, `maprisma-actions`).
+the AI helper you chose in Maprisma Manager → AI answers, and the answer shows in the pill. The
+helper can also propose **actions** ("open Firefox", "how is the weather in Berlin", "switch to dark
+theme"), which the overlay carries out itself with typed tools, never a shell (see [Actions](#actions)).
+It can read its answers aloud (`speak_answers`).
 
 ```sh
 maprisma-dictation --toggle    # open and listen (ends when you stop talking); open already → close
 maprisma-dictation --hold      # hold-to-talk: bind to a key press …
 maprisma-dictation --release   # … and this to the same key's release
 maprisma-dictation --demo      # made-up voice levels, speech and answer: try the look without a mic or helper
+maprisma-dictation --ask "open Firefox"   # open without listening and ask this at once, as if typed
 ```
 
 ## Using it
@@ -21,8 +24,10 @@ maprisma-dictation --demo      # made-up voice levels, speech and answer: try th
 | Follow-up | ask again within 45 s (also after closing and reopening): the last question and answer go along as context. |
 | **Ctrl+M** | listen again (or stop listening and send what was heard). |
 | **Ctrl+Shift+C** | copy the answer. |
-| **Esc** | in stages: first it stops listening or the helper's answer (the question comes back into the field); the next Esc closes. |
-| Click outside | closes, but only when nothing would be lost (no listening, no answer coming, no typed text). |
+| **Esc** | in stages: first it stops listening, the helper's answer (the question comes back into the field), reading aloud, or a waiting confirmation card; the next Esc closes. |
+| **Enter** on an amber card | runs the action that waits (only with an empty field; typing a new question instead cancels the card). |
+| **Ctrl+Z** | undoes the newest action that can be undone (or click its *Undo*). |
+| Click outside | closes, but only when nothing would be lost (no listening, no answer coming, no typed text, no card waiting). |
 | **F12** | saves a picture of the overlay to `~/Pictures/Maprisma Dictation/`. |
 
 The answer understands a little Markdown: paragraphs, headings, bullet and numbered lists, and code.
@@ -32,15 +37,17 @@ The pill grows from 380×52 to at most 480×360 as content arrives, and the answ
 
 - Colours, corners and the light/dark choice come from the desktop, like every Maprisma app
   (`src/look.rs` and `src/corners.rs` are the shared copies): COSMIC's theme, Maprisma Shell's
-  scheme on Hyprland, kdeglobals on KDE. The pill is the theme's background at 92 % opacity; its
-  radius is the desktop's (clamped to 12–26, 0 with Corners → Square).
+  scheme on Hyprland, kdeglobals on KDE. The pill is the theme's background, fully opaque (at
+  92 % text behind it showed through on Hyprland); its radius is the desktop's (clamped to 12–26,
+  0 with Corners → Square).
 - **The aura ring** (docs/research/antigravity-design.md B, option 1): a 2 px gradient stroke and a
   soft bloom around the pill, in three hues taken from the theme's accent in OKLCH (H, H+28°, H−20°;
   dark themes L 0.74 and C 0.10–0.18, light themes L 0.50 and C 0.12–0.20, which keeps 4.5:1 against
   white). While listening the microphone level (attack 30 ms, release 130 ms) drives the stroke
   (1.5–3.5 px) and the bloom (15–65 %). Transcribing: a ripple runs inwards. Thinking: the colours
   sweep round once every 1.4 s. Done: a 280 ms green flash. Error: a 320 ms shake of ±4 px, and red.
-  Idle: a faint 1 px ring that breathes slowly.
+  Idle: a faint 1 px ring that breathes slowly. Speaking (an answer read aloud): a gentle pulse of
+  the stroke and bloom (about one swell per 1.1 s; the service sends no level for speech).
 - Reduced motion (the desktop's setting: Plasma's animation speed at "instant", Hyprland's
   `animations:enabled = false`, GNOME/COSMIC `enable-animations`; or the `motion` setting) keeps the
   level and the colours but drops the sweep, the ripple, the shake, the breath and the size morph.
@@ -59,6 +66,10 @@ overlay only reads it; Maprisma Manager's Voice page (step 2) will write it.
 | `end` | `silence` | how a toggle session ends: `silence` or `release` |
 | `screenshot_key` | `true` | F12 saves a picture |
 | `keyboard` | `on_demand` | `exclusive` for a compositor that doesn't give an on-demand layer surface the keyboard |
+| `actions` | `true` | the helper may propose actions; `false`: answers only (the old preamble) |
+| `confirm_all` | `false` | every action waits for Enter (read-only weather lookups excepted) |
+| `weather_location` | `""` | the place for "how is the weather" without one; empty: the city of the system time zone (`/etc/localtime`) |
+| `speak_answers` | `false` | read each answer aloud through maprisma-voice's `Speak` (Kokoro, docs/protocol.md); the actions block is never read |
 
 Voice settings (engine, model, language, microphone) are maprisma-voice's (docs/protocol.md).
 
@@ -73,12 +84,85 @@ Copilot, Grok, Hermes, omp, OpenClaw, pi); `pi:<provider>/<model>` runs pi with 
 
 - The question goes in the argv as one argument (or on stdin when the catalog says so), never
   through a shell, after a short preamble: "you are a desktop assistant on Linux (COSMIC, KDE
-  Plasma, Hyprland); answer briefly in the user's language; you cannot act on the desktop yet".
+  Plasma, Hyprland); answer briefly in the user's language", plus the actions schema below
+  (`helper::ACTIONS_PREAMBLE`; with `actions: false`: "you cannot act on the desktop").
 - It runs in `$XDG_RUNTIME_DIR/maprisma-dictation/work` in its own process group, with
   `NO_COLOR=1`; output is cut at 256 KiB and the run at 4 minutes. Esc, or closing the overlay, stops
   the whole group.
 - The last exchange is kept in `$XDG_RUNTIME_DIR/maprisma-dictation/last.json` (0600, deleted when
-  older than 45 s, gone at logout). Nothing else is stored.
+  older than 45 s, gone at logout), with what its actions did (so "and tomorrow?" after a weather
+  card has the numbers) and whether it read outside text. Besides that, only the action log is
+  stored (below).
+
+## Actions
+
+The helper never gets a shell or tools. It may end its answer with **one** fenced block
+` ```maprisma-actions ` holding a JSON array (at most 6 objects, 8 KiB) from this fixed schema; the
+overlay parses it strictly (`src/actions/schema.rs`): an unknown kind, an unknown or missing field,
+a wrong type or a value out of range rejects that object (a "can't read" chip); two blocks, an
+unclosed or oversized block or one that isn't an array reject them all. The block never shows as
+text and is never read aloud.
+
+| kind | fields | level | what the overlay does | Undo |
+|---|---|---|---|---|
+| `open_app` | `name` (≤ 100) | 0 | finds the app among the desktop entries (`$XDG_DATA_HOME/applications`, `$XDG_DATA_DIRS/*/applications`, Flatpak exports; NoDisplay/Hidden/OnlyShowIn respected) by Name (also localized), id, GenericName or Keywords, exact, prefix, word or one typo; starts it with `gtk-launch <id>` (or `gio launch <file>`) in a session of its own. A kind of app several are ("a browser") shows them as buttons to pick. | – |
+| `open_url` | `url` (http/https with a host) | 0 | `xdg-open` | – |
+| `dnd` | `on` | 0 | Maprisma Notifier's switch: `dnd` in `~/.config/maprisma-notifier/settings.json` (other keys kept); its recorder applies it on each desktop | previous value |
+| `theme_mode` | `mode`: `light`/`dark` | 0 | Maprisma Theme: nothing when the current theme already is that mode, else the most recently used theme of that mode (themes hidden in Maprisma Theme only when there is no other), applied with `maprisma-theme-core apply <slug>`. Light = a `light.mode` file or a background luminance > 0.5, as Maprisma Theme decides. | the previous theme |
+| `volume` | `percent` 0–100 or `change` ±1–100, and/or `mute` | 0 | `wpctl` on `@DEFAULT_AUDIO_SINK@` (never above 100 %; a change on a muted sink unmutes) | previous volume and mute |
+| `media` | `command`: `play_pause`/`next`/`previous` | 0 | `playerctl` | play/pause only |
+| `workspace` | `number` 1–20 | 0 | per desktop (table below) | the previous workspace |
+| `move_window` | `workspace` 1–20 | 0 | moves the active window (per desktop) | Hyprland: back |
+| `weather` | `location` (may be empty) | 0, read-only | Open-Meteo, no key: geocoding, then the forecast, with `curl` (argv, https only, 8 s and 512 KiB each); a card with the temperature, conditions, feels-like, wind, today's high/low and rain chance, and the next 6 hours, in the overlay's language | – |
+| `close_window` | – | 1 | closes the active window (the card names it on Hyprland) | – |
+| `run_command` | `argv` (1–32 strings, 4 KiB), `why` | 1 (or 2) | the card shows the argv in monospace; Enter runs it **without a shell**, in `$HOME`, stdin closed, its own process group killed after 60 s, output kept up to 16 KiB and shown | – |
+
+`write_file` and `move_file` are left out: doing them safely (paths, overwrites, the trash, Undo)
+is not simple, and `run_command` with Enter covers the rare need.
+
+**Levels** (`src/actions/policy.rs`):
+- **0** runs at once and shows a chip ("▸ Opened Firefox"), with *Undo* where it can be undone.
+- **1** shows the amber card: **[Enter] Run / [Esc] Cancel** (or the buttons). Only a key press or
+  click confirms; speech never does: a spoken "yes" is a new question, and any new question cancels
+  the card. Cancelling a card also drops the actions after it.
+- **2** never runs; a "blocked" chip says why. `run_command` is blocked when its program (also
+  behind `env`, `nice`, `timeout`, `setsid` …) is: `sudo`, `pkexec`, `su`, `doas`, `run0` …;
+  a package tool (pacman, yay, paru, flatpak install/remove, pip/cargo install, npm -g …); a deleter
+  (`rm`, `shred`, `find -delete/-exec`, `git clean`, `rsync --delete`); disk and system tools
+  (`dd`, `mkfs*`, `mount`, `systemctl reboot` …); autostart (`systemctl enable/disable`, `crontab`)
+  or any argument naming autostart/shell profiles (`.bashrc`, `.profile`, `config.fish`,
+  `~/.config/autostart`, `environment.d` …); secrets (`~/.ssh`, `~/.gnupg`, keyrings, kwallet,
+  `*.env`, `.netrc`, key files, `gpg`, `secret-tool`, `pass` …); and shells, interpreters and other
+  ways to hide what runs (`sh -c`, `python`, `xargs`, `ssh`, `hyprctl dispatch exec` …).
+- **Outside text taints**: when the request is a follow-up of an answer that read outside text (a
+  weather result) or looks pasted (more than two lines or 600 characters), its level-0 actions
+  need Enter too; so does every level-0 action after a weather lookup in the same answer.
+  `confirm_all` makes every action (except the read-only weather) wait for Enter.
+
+Actions run one at a time, in order. The helper's follow-up sees what they did.
+
+**Per desktop**:
+
+| | Hyprland | KDE Plasma 6 | COSMIC |
+|---|---|---|---|
+| workspace | `hyprctl dispatch hl.dsp.focus({workspace = "N"})`, else `workspace N` | `org.kde.KWin /KWin setCurrentDesktop` (busctl) | unsupported (no interface for other apps) |
+| move window | `hl.dsp.window.move({workspace = "N", window = "address:…"})`, else `movetoworkspace` | a KWin script (loadScript/run/unloadScript through busctl; the newest normal window, never the overlay) | unsupported |
+| close window | `hl.dsp.window.close({window = "address:…"})`, else `closewindow` | a KWin script | unsupported |
+| apps, URLs, volume, media, DND, theme, weather | yes | yes | yes |
+
+KDE's commands are built and tested but not tried on a live Plasma session yet.
+
+**The log**: every executed, undone, blocked, rejected, cancelled or failed action is appended to
+`~/.local/state/maprisma-dictation/actions.jsonl` (folder 0700, file 0600; at 1 MB it moves to
+`actions.jsonl.1`): `{"time", "request" (cut at 300 characters), "action", "level", "result", "detail"}`.
+Maprisma Manager will show it.
+
+## Spoken answers
+
+With `speak_answers` on, each answer's text (not the actions block) goes to maprisma-voice's
+`Speak` with the overlay's language (`de`, `en`, else `auto`). While it speaks, the ring pulses and
+the footer says *Esc stops reading aloud*; Esc, closing, a new question or a new voice session call
+`StopSpeaking`. If speech isn't available (no Kokoro), the reason shows in the footer for a moment.
 
 ## A key for it
 
@@ -139,9 +223,13 @@ iced_layershell or smithay-client-toolkit were not needed.
 ## Checking it
 
 - `cargo test --workspace` (headless): ring colours, envelope, state machine (staged Esc, typing
-  over speech, hold/tap, click outside), helper catalog/argv/run, shared helper choice, markdown,
-  follow-ups, translations. `dbus-run-session -- cargo test -p maprisma-dictation -- --ignored`
-  adds the single-instance test.
+  over speech, hold/tap, click outside, the card, speaking), helper catalog/argv/run, shared helper
+  choice, markdown, follow-ups, translations; actions: schema (valid, invalid, oversized, unknown),
+  levels and the block-list, app lookup in fake desktop-entry folders, desktop commands per desktop,
+  volume/DND/theme decisions, Open-Meteo parsing from canned JSON, the log and its rotation, Undo
+  bookkeeping. `dbus-run-session -- cargo test -p maprisma-dictation -- --ignored` adds the
+  single-instance test; `cargo test -p maprisma-dictation live_ -- --ignored` asks the real helper
+  for `uname -r`, confirms the card as Enter would and runs it.
 - `MAPRISMA_DICTATION_OUTPUT=<output name>` opens it on that output (for off-screen screenshots
   on a headless Hyprland output); `MAPRISMA_DICTATION_DEBUG=1` prints the layer surfaces' keyboard
   focus.
