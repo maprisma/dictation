@@ -75,6 +75,8 @@ pub enum Message {
     LookTick,
     ClickOutside,
     ClearStatus(u64),
+    /// The answer's measured height.
+    BodySize(Size),
 }
 
 pub struct Overlay {
@@ -114,6 +116,8 @@ pub struct Overlay {
     status: Option<String>,
     status_gen: u64,
     capturing: bool,
+    /// The body's measured height (None until laid out).
+    body_height: Option<f32>,
 }
 
 fn rgb(c: Color) -> aura::Rgb {
@@ -200,9 +204,13 @@ impl Overlay {
             return COMPACT;
         }
         let height = match &m.phase {
-            Phase::Thinking => COMPACT.1 + 1.0 + 12.0 + 22.0 + 22.0 + 12.0,
+            Phase::Thinking => COMPACT.1 + 1.0 + 10.0 + 22.0 + 12.0,
             Phase::Error(e) => COMPACT.1 + 1.0 + 12.0 + 22.0 * (e.chars().count() as f32 / 58.0).ceil().max(1.0) + 12.0 + 26.0,
-            _ if !m.answer.is_empty() => estimate_height(&markdown::parse(&m.answer), !m.question.is_empty(), EXPANDED_WIDTH),
+            _ if !m.answer.is_empty() => match self.body_height {
+                // the field, divider, gap, body, footer
+                Some(body) => COMPACT.1 + 1.0 + 10.0 + body + 4.0 + 30.0,
+                None => estimate_height(&markdown::parse(&m.answer), !m.question.is_empty(), EXPANDED_WIDTH),
+            },
             _ => COMPACT.1 + 30.0,
         };
         (EXPANDED_WIDTH, height.min(MAX_HEIGHT))
@@ -305,7 +313,10 @@ impl Overlay {
                     self.queued.clear();
                     self.target_level = 0.0;
                 }
-                Effect::Ask(question) => tasks.push(self.ask(question)),
+                Effect::Ask(question) => {
+                    self.body_height = None;
+                    tasks.push(self.ask(question));
+                }
                 Effect::CancelAsk => self.cancel_ask(),
                 Effect::FlashDone => self.done_at = Some(Instant::now()),
                 Effect::FlashError => self.error_at = Some(Instant::now()),
@@ -498,10 +509,6 @@ impl Overlay {
             any = true;
         }
         match &m.phase {
-            Phase::Thinking => {
-                col = col.push(text::body(tr("Thinking…")).class(theme::Text::Custom(dim_text)));
-                any = true;
-            }
             Phase::Error(e) => {
                 col = col.push(text::body(if e.is_empty() { tr("Something went wrong.") } else { tr(e) }).class(theme::Text::Custom(error_text)));
                 any = true;
@@ -518,7 +525,10 @@ impl Overlay {
             col = col.push(text::caption(tr(note)).class(theme::Text::Custom(dim_text)));
             any = true;
         }
-        any.then(|| scrollable(container(col).padding([0, 16, 4, 16])).height(Length::Fill).into())
+        let measured = cosmic::iced::widget::sensor(container(col).padding([0, 20, 4, 16]).width(Length::Fixed(self.size_to.0)))
+            .on_show(Message::BodySize)
+            .on_resize(Message::BodySize);
+        any.then(|| scrollable(measured).height(Length::Fill).into())
     }
 
     fn footer(&self) -> Element<'_, Message> {
@@ -712,7 +722,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
             let layers = 9;
             for i in 1..=layers {
                 let f = i as f32 / (layers + 1) as f32;
-                let a = bloom * 0.34 * (1.0 - f).powi(2);
+                let a = bloom * 0.6 * (1.0 - f).powf(1.6);
                 let ring = grow(pill, f * 16.0);
                 frame.stroke(&rounded(ring, r + f * 16.0), Stroke { style: self.gradient(&colors, angle, a), width: 2.4, ..Default::default() });
             }
@@ -807,6 +817,7 @@ impl cosmic::Application for Overlay {
             status: None,
             status_gen: 0,
             capturing: false,
+            body_height: None,
         };
         let theme = corners::set_app_theme(&app.settings.corners);
         let open = if app.output_wanted.is_some() {
@@ -996,6 +1007,12 @@ impl cosmic::Application for Overlay {
                     Err(reason) => trf("The screenshot could not be saved: {0}", &[&reason]),
                 };
                 return self.set_status(text);
+            }
+            Message::BodySize(size) => {
+                if self.body_height != Some(size.height) {
+                    self.body_height = Some(size.height);
+                    return self.update_zone(false);
+                }
             }
             Message::ClearStatus(generation) => {
                 if generation == self.status_gen {
