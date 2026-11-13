@@ -145,6 +145,14 @@ pub fn overlay_program(exe: Option<&Path>, home: &Path) -> PathBuf {
     if local.is_file() { local } else { PathBuf::from("maprisma-dictation") }
 }
 
+/// The SNI `IconThemePath`: `<prefix>/share/icons` when the bar icons were installed next to this
+/// program's `<prefix>/bin` (a prefix other than the icon theme's search path, e.g. /opt or a test
+/// prefix), else empty (the host looks the names up in the icon theme as usual).
+pub fn icon_theme_path(exe: Option<&Path>) -> String {
+    let Some(icons) = exe.and_then(Path::parent).and_then(Path::parent).map(|prefix| prefix.join("share/icons")) else { return String::new() };
+    if icons.join(format!("hicolor/scalable/apps/{ICON}.svg")).is_file() { icons.to_string_lossy().into_owned() } else { String::new() }
+}
+
 /// A command as program and arguments (never a shell).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -429,6 +437,13 @@ mod tests {
         assert_eq!(toggle_command(Some(&root.join("other/x")), &home).program, home.join(".local/bin/maprisma-dictation"));
         std::fs::write(bin.join("maprisma-dictation"), "").unwrap();
         assert_eq!(toggle_command(Some(&tray), &home), Command { program: bin.join("maprisma-dictation"), args: vec!["--toggle".into()] });
+        // The icons next to the program's prefix.
+        assert_eq!(icon_theme_path(Some(&tray)), "");
+        assert_eq!(icon_theme_path(None), "");
+        let apps = root.join("prefix/share/icons/hicolor/scalable/apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(apps.join(format!("{ICON}.svg")), "<svg/>").unwrap();
+        assert_eq!(icon_theme_path(Some(&tray)), root.join("prefix/share/icons").to_string_lossy());
         assert_eq!(settings_command(), Command { program: "maprisma-manager".into(), args: vec!["--page".into(), "voice".into()] });
     }
 

@@ -196,6 +196,11 @@ impl Tray {
     fn icon_pixmap(&self) -> Pixmaps {
         vec![]
     }
+    /// Where the icons are when they aren't in the icon theme's search path (a prefix install).
+    #[zbus(property)]
+    fn icon_theme_path(&self) -> String {
+        bar::icon_theme_path(std::env::current_exe().ok().as_deref())
+    }
     #[zbus(property)]
     fn overlay_icon_name(&self) -> &str {
         ""
