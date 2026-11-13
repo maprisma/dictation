@@ -1,0 +1,26 @@
+[package]
+name = "maprisma-voice"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Maprisma voice service: one session D-Bus service for speech to text (later text to speech) for all Maprisma apps"
+
+[lib]
+name = "maprisma_voice"
+path = "src/lib.rs"
+
+[[bin]]
+name = "maprisma-voice"
+path = "src/main.rs"
+
+[dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["io-util", "io-std", "time", "macros", "rt", "rt-multi-thread", "sync", "signal"] }
+futures-util = "0.3"
+serde_json = "1"
+libc = "0.2"
+sha2 = "0.10"
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
+
+[profile.release]
+lto = "thin"
