@@ -228,10 +228,33 @@ pub fn score(app: &App, query: &str) -> u32 {
 }
 
 /// The app for a name: one clear best, or the best few to choose from.
+/// The query names a kind of app (its GenericName or a keyword), not one app.
+fn category_match(app: &App, query: &str) -> bool {
+    let q = norm(query);
+    q.len() >= 3
+        && (app.generic.split(';').any(|g| norm(g) == q || words(g).iter().any(|w| norm(w) == q)) || app.keywords.iter().any(|k| norm(k) == q))
+}
+
 pub fn resolve(apps: &[App], query: &str) -> Found {
+    // "a browser", "the terminal": the article doesn't count.
+    let query = query.trim();
+    let lower = query.to_lowercase();
+    let query = ["a ", "an ", "the ", "my "].iter().find_map(|a| lower.strip_prefix(a).map(|_| query[a.len()..].trim())).unwrap_or(query);
     let mut scored: Vec<(u32, &App)> = apps.iter().map(|a| (score(a, query), a)).filter(|(s, _)| *s >= 30).collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase())));
     let Some(&(top, first)) = scored.first() else { return Found::None };
+    // A kind of app ("browser") that several apps are: let the user pick, unless one is called exactly that.
+    if top < 90 {
+        let kind: Vec<App> = scored.iter().filter(|(_, a)| category_match(a, query)).take(5).map(|(_, a)| (*a).clone()).collect();
+        if kind.len() >= 2 {
+            let mut choices = kind;
+            if !choices.iter().any(|a| a.id == first.id) {
+                choices.insert(0, first.clone());
+                choices.truncate(5);
+            }
+            return Found::Choices(choices);
+        }
+    }
     let ties: Vec<&App> = scored.iter().filter(|(s, _)| *s == top).map(|(_, a)| *a).collect();
     if ties.len() == 1 && (top >= 75 || scored.len() == 1 || scored[1].0 + 20 <= top) {
         return Found::One(first.clone());
@@ -283,6 +306,7 @@ mod tests {
         let flat = root.join("flatpak/applications");
         write(&sys, "firefox.desktop", &entry("Firefox", "GenericName=Web Browser\nGenericName[de]=Webbrowser\nKeywords=Internet;WWW;Browser;\nName[de]=Firefox Browser"));
         write(&sys, "google-chrome.desktop", &entry("Google Chrome", "GenericName=Web Browser\nKeywords=browser;web"));
+        write(&sys, "zen.desktop", &entry("Zen Browser", "GenericName=Web Browser"));
         write(&sys, "org.gnome.Calculator.desktop", &entry("Calculator", "Keywords=calc;math;"));
         write(&sys, "kitty.desktop", &entry("kitty", "GenericName=Terminal emulator"));
         write(&sys, "hidden.desktop", &entry("Hidden thing", "NoDisplay=true"));
@@ -332,10 +356,16 @@ mod tests {
         match resolve(&apps, "web browser") {
             Found::Choices(c) => {
                 let names: Vec<&str> = c.iter().map(|a| a.name.as_str()).collect();
-                assert_eq!(names, ["Firefox", "Google Chrome"]);
+                assert_eq!(names, ["Firefox", "Google Chrome", "Zen Browser"]);
             }
             other => panic!("{other:?}"),
         }
+        // a kind of app several are: choose (also when one has the word in its name)
+        match resolve(&apps, "a browser") {
+            Found::Choices(c) => assert_eq!(c.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Zen Browser", "Firefox", "Google Chrome"]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(one("the calculator"), "Calculator");
         assert_eq!(resolve(&apps, "photoshop"), Found::None);
         assert_eq!(resolve(&apps, ""), Found::None);
         let signal = apps.iter().find(|a| a.name == "Signal").unwrap();
