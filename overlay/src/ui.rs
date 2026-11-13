@@ -95,6 +95,8 @@ pub enum Message {
     /// One of several matching apps was picked.
     Pick(usize, usize),
     Speak(u64, SpeakEvent),
+    /// `--ask TEXT`, sent once the overlay has settled.
+    AskNow(String),
 }
 
 pub struct Overlay {
@@ -233,13 +235,15 @@ impl Overlay {
             Some(End::Release)
         };
         let listen = if self.flags.ask.is_some() { None } else { listen };
-        let mut effects = self.machine.handle(Event::Opened { listen });
-        if let Some(question) = self.flags.ask.take() {
-            self.machine.handle(Event::Typed(question));
-            effects.extend(self.machine.handle(Event::Submit));
-        }
+        let effects = self.machine.handle(Event::Opened { listen });
+        // --ask: once the surface has settled (its first configure and output scale; a body
+        // measured in the very first frames can race libcosmic's scale change and crash it).
+        let ask_now = match self.flags.ask.take() {
+            Some(question) => Task::perform(tokio::time::sleep(Duration::from_millis(500)), move |_| cosmic::Action::App(Message::AskNow(question.clone()))),
+            None => Task::none(),
+        };
         let zone = self.update_zone(true);
-        Task::batch([get_layer_surface(self.layer_settings(id)), zone, cosmic::widget::text_input::focus(INPUT_ID.clone()), self.run(effects)])
+        Task::batch([get_layer_surface(self.layer_settings(id)), zone, cosmic::widget::text_input::focus(INPUT_ID.clone()), self.run(effects), ask_now])
     }
 
     /// The pill's size for what shows now.
@@ -583,8 +587,8 @@ impl Overlay {
         let sizes = corners::sizes(&self.settings.corners);
         let radius = if corners::normalize(&self.settings.corners) == "square" { 0.0 } else { sizes.radius.clamp(12.0, 26.0) };
         let mut surface: Color = c.bg_color().into();
-        // Nearly opaque: text behind the pill must not show through the answer.
-        surface.a = 0.985;
+        // Opaque: text behind the pill must not show through the answer (Hyprland showed it at 92 %).
+        surface.a = 1.0;
         AuraCanvas {
             pill: Rectangle::new(Point::new((SURFACE.0 - w) / 2.0 + shake, MARGIN), Size::new(w, h)),
             radius: radius.min(h / 2.0),
@@ -1244,6 +1248,9 @@ impl cosmic::Application for Overlay {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        if *DEBUG && !matches!(message, Message::Frame | Message::LookTick | Message::Voice(_, VoiceEvent::Level(_))) {
+            eprintln!("maprisma-dictation: {}", format!("{message:?}").chars().take(160).collect::<String>());
+        }
         match message {
             Message::Output(name, output) => {
                 if self.surface.is_none() && self.output_wanted.as_deref() == Some(name.as_str()) {
@@ -1353,6 +1360,10 @@ impl cosmic::Application for Overlay {
                     self.pump()
                 };
                 return Task::batch([task, next]);
+            }
+            Message::AskNow(question) => {
+                let task = self.handle(Event::Typed(question));
+                return Task::batch([task, self.handle(Event::Submit)]);
             }
             Message::Prepared(generation, targets) => {
                 if generation == self.turn_gen {

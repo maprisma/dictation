@@ -88,24 +88,45 @@ pub fn run_capture(argv: &[String], timeout: Duration, cwd: Option<&std::path::P
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let stdout = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).into_owned();
+    // Something the program started in the background may keep the pipes open: wait a moment, not forever.
+    let stdout = out_thread.take(Duration::from_secs(1));
+    let stderr = err_thread.take(Duration::from_millis(200));
     Ok(Ran { ok: status.success() && !timed_out, stdout, stderr, timed_out })
 }
 
-fn read_bounded(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+/// Reads up to OUTPUT_MAX bytes on a thread; [Bounded::take] gives what came (waiting at most
+/// `wait` for the end).
+struct Bounded {
+    kept: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+impl Bounded {
+    fn take(self, wait: Duration) -> String {
+        let _ = self.done.recv_timeout(wait);
+        let kept = self.kept.lock().map(|k| k.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&kept).into_owned()
+    }
+}
+
+fn read_bounded(mut r: impl Read + Send + 'static) -> Bounded {
+    let (sender, done) = std::sync::mpsc::channel();
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let shared = kept.clone();
     std::thread::spawn(move || {
-        let mut kept = vec![];
         let mut buf = [0u8; 8192];
         while let Ok(n) = r.read(&mut buf) {
             if n == 0 {
                 break;
             }
-            let room = OUTPUT_MAX.saturating_sub(kept.len());
-            kept.extend_from_slice(&buf[..n.min(room)]);
+            if let Ok(mut k) = shared.lock() {
+                let room = OUTPUT_MAX.saturating_sub(k.len());
+                k.extend_from_slice(&buf[..n.min(room)]);
+            }
         }
-        kept
-    })
+        let _ = sender.send(());
+    });
+    Bounded { kept, done }
 }
 
 /// Starts argv in a session of its own (it outlives the overlay); waits up to `wait` for it to
@@ -124,9 +145,18 @@ pub fn spawn_detached(argv: &[String], wait: Duration) -> Result<(), String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // What is in the pipe now: the started app keeps it open, so never read to its end.
                 let mut err = String::new();
-                if let Some(e) = child.stderr.take() {
-                    let _ = e.take(4096).read_to_string(&mut err);
+                if let Some(mut e) = child.stderr.take() {
+                    use std::os::fd::AsRawFd;
+                    unsafe {
+                        let fd = e.as_raw_fd();
+                        libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
+                    }
+                    let mut buf = [0u8; 4096];
+                    if let Ok(n) = e.read(&mut buf) {
+                        err = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    }
                 }
                 return if status.success() { Ok(()) } else { Err(err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(200).collect()) };
             }
@@ -426,8 +456,16 @@ mod tests {
         let r = run_capture(&["sh".into(), "-c".into(), "head -c 100000 /dev/zero".into()], Duration::from_secs(5), None).unwrap();
         assert_eq!(r.stdout.len(), OUTPUT_MAX);
         assert!(run_capture(&["/nonexistent/program".into()], Duration::from_secs(1), None).is_err());
+        let started = Instant::now();
+        let r = run_capture(&["sh".into(), "-c".into(), "setsid sleep 4 & echo hi".into()], Duration::from_secs(5), None).unwrap();
+        assert!(r.ok && started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert_eq!(r.stdout, "hi\n");
         assert!(spawn_detached(&["false".into()], Duration::from_secs(2)).is_err());
         assert!(spawn_detached(&["true".into()], Duration::from_secs(2)).is_ok());
+        // A launcher that exits while what it started keeps stderr open must not hang us.
+        let started = Instant::now();
+        assert!(spawn_detached(&["sh".into(), "-c".into(), "sleep 3 & echo started >&2".into()], Duration::from_secs(2)).is_ok());
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
     #[test]
