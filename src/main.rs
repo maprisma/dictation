@@ -12,6 +12,7 @@ const USAGE: &str = "maprisma-voice — the Maprisma voice service
                                               speak; partial text on stderr, the final text on stdout
   maprisma-voice dictate --events [--release] [--app-id ID] …
                                               for apps: JSON lines on stdout; stdin `finish`/`cancel`
+  maprisma-voice speak TEXT [--language CODE] read TEXT aloud (Kokoro, if installed)
   maprisma-voice transcribe FILE.wav [--engine E] [--model M] [--language CODE]
                                               a 16-bit PCM WAV file to text, without the daemon
   maprisma-voice status [--json]              engine, model, language and why it is not ready
@@ -40,6 +41,10 @@ fn main() -> ExitCode {
         Some("dictate") => dictate(&args[1..]),
         Some("transcribe") => transcribe(&dirs, &args[1..]),
         Some("status") => status(&args[1..]),
+        Some("speak") if args.len() >= 2 && !args[1].starts_with("--") => {
+            let (text, language) = (args[1].clone(), value_of(&args[1..], "--language").map(str::to_string));
+            runtime(async move { client::speak(&text, language.as_deref()).await })
+        }
         Some("models") => {
             let listing = models::listing(&dirs, &settings::load(&dirs).model);
             if args.iter().any(|a| a == "--json") {

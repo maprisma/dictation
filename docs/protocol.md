@@ -37,10 +37,20 @@ Stop without text (`Closed("cancelled")`).
 - The chosen setup: `enabled`, `ready`, `why_not` and `message` (a code and its text), `engine`, `engine_setting`, `engines` (those available), `model`, `models`, `language`, `microphone`, `recorder`.
 - The local engine: `whisper_server`, `server_running`, `server_port`.
 - Also: `typed_by_engine`, `online_provider`, `sessions`, `version`.
+- Spoken answers: `speech_ready`, `speech_why_not`, `speech_message`, `speaking`.
 - `why_not` codes: `disabled`, `no_engine`, `no_whisper_server`, `no_model`, `no_online_key`, `no_voxtype`, `no_superwhisper`, `no_omarchy`, `no_recorder`.
 
-### `Speak(s text, a{sv} options) → s`, `StopSpeaking()`
-Reserved for spoken answers in a later step. They fail with `NotSupported`.
+### `Speak(s text, a{sv} options) → s speak_id`
+- Reads `text` aloud, up to 8000 characters. It is split into sentences and Markdown is dropped.
+- The voice is **Kokoro** from the Maprisma Narrator's runtime (`~/.local/share/kindle-reader`, or the `kokoro_runtime` setting). It is used read-only: the Narrator's resident worker, with no bytecode written and the audio only in our private runtime folder. Sound goes out through `pw-play`, `paplay` or `aplay`.
+- Only the German "Martin" voice is installed by default. It reads English too, with an accent.
+- `options`: `language` (`auto`/`de` → German, `en` → English).
+- A new `Speak`, `StopSpeaking` or `StartSession` stops the current speech at once.
+- It is refused while a session is listening.
+- Errors: `NotReady`, with `speech_why_not` being `no_kokoro`, `no_kokoro_model` or `no_player`.
+
+### `StopSpeaking()`
+Stops the voice at once.
 
 ## Signals (all carry the `session_id` first)
 
@@ -51,6 +61,7 @@ Reserved for spoken answers in a later step. They fail with `NotSupported`.
 | `Partial` | `s text` | about every 1.2 s of audio while listening (local Whisper only), the whole text so far |
 | `Final` | `s text`, `a{sv} details` | once at the end. `details`: `typed` (b: an external engine typed the text itself, so `text` is empty), `engine`, `model`, `language`, `audio_ms`, `elapsed_ms` |
 | `Error` | `s code`, `s message` | before `Closed("error")` |
+| `Speaking` | `s speak_id`, `s state`, `s message` | `speaking`, then `done`, `stopped` or `error` (with a message); the first argument is the speak id, not a session |
 | `Closed` | `s reason` | always last: `finished`, `silence`, `max_length`, `no_speech`, `cancelled`, `preempted`, `client_gone`, `recorder_ended` or `error` |
 
 ## Settings
@@ -65,7 +76,8 @@ Reserved for spoken answers in a later step. They fail with `NotSupported`.
 | `microphone` | `default` | a PipeWire node name |
 | `whisper_server` | `""` | the path to whisper-server; empty searches for it |
 | `preload` | `false` | load the model when the daemon starts |
-| `unload_minutes` | `10` | stop whisper-server, freeing its GPU memory, after this many idle minutes; `0` never stops it |
+| `unload_minutes` | `10` | stop whisper-server, freeing its GPU memory, after this many idle minutes; `0` never stops it (the Kokoro worker too) |
+| `kokoro_runtime` | `""` | the Narrator's runtime folder for spoken answers; empty means `~/.local/share/kindle-reader` |
 | `ui_language` | `system` | the language of the messages: `en`, `de`, `fr`, `es`, `it`, `pt`, `nl` or `pl` |
 
 The CLI writes them with `maprisma-voice set KEY VALUE` and `unset KEY`, which checks each value.

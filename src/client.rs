@@ -213,3 +213,49 @@ pub async fn status() -> Result<serde_json::Map<String, serde_json::Value>, Stri
     let map: HashMap<String, OwnedValue> = reply.body().deserialize().map_err(|e| e.to_string())?;
     Ok(map.iter().map(|(k, v)| (k.clone(), crate::dbus::value_to_json(v))).collect())
 }
+
+/// `speak TEXT`: reads it aloud through the daemon and waits until it is done. Exit codes: 0
+/// spoken, 1 failed or stopped, 4 service missing.
+pub async fn speak(text: &str, language: Option<&str>) -> i32 {
+    let connection = match zbus::Connection::session().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{} ({e})", tr("The voice service is not running."));
+            return 4;
+        }
+    };
+    let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).interface(INTERFACE).unwrap().member("Speaking").unwrap().path(PATH).unwrap().build();
+    let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, &connection, Some(64)).await else { return 4 };
+    let mut opts: HashMap<&str, Value<'_>> = HashMap::new();
+    if let Some(l) = language {
+        opts.insert("language", l.into());
+    }
+    let reply = connection.call_method(Some(NAME), PATH, Some(INTERFACE), "Speak", &(text, opts)).await;
+    let id: String = match reply.and_then(|r| r.body().deserialize::<String>()) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("{}", dbus_message(&e));
+            return 1;
+        }
+    };
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
+    loop {
+        tokio::select! {
+            message = stream.next() => {
+                let Some(Ok(message)) = message else { return 1 };
+                let Ok((sid, state, msg)) = message.body().deserialize::<(String, String, String)>() else { continue };
+                if sid != id { continue }
+                match state.as_str() {
+                    "done" => return 0,
+                    "stopped" => return 1,
+                    "error" => { eprintln!("{msg}"); return 1 }
+                    _ => {}
+                }
+            }
+            _ = async { match interrupt.as_mut() { Some(i) => { i.recv().await; } None => std::future::pending::<()>().await } } => {
+                let _ = connection.call_method(Some(NAME), PATH, Some(INTERFACE), "StopSpeaking", &()).await;
+                return 1;
+            }
+        }
+    }
+}

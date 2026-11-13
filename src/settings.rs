@@ -25,6 +25,8 @@ pub struct Settings {
     pub preload: bool,
     /// Stop whisper-server (and free its GPU memory) after this many idle minutes; 0 keeps it.
     pub unload_minutes: u32,
+    /// Kokoro for spoken answers (the Narrator's runtime folder); empty: ~/.local/share/kindle-reader.
+    pub kokoro_runtime: String,
     /// The language of the service's own messages: `system` or one of the 8 codes.
     pub ui_language: String,
 }
@@ -40,6 +42,7 @@ impl Default for Settings {
             whisper_server: String::new(),
             preload: false,
             unload_minutes: 10,
+            kokoro_runtime: String::new(),
             ui_language: "system".into(),
         }
     }
@@ -73,6 +76,7 @@ pub fn parse(value: &Value) -> Settings {
         whisper_server: server.into(),
         preload: value.get("preload").and_then(Value::as_bool).unwrap_or(d.preload),
         unload_minutes: value.get("unload_minutes").and_then(Value::as_u64).filter(|m| *m <= 1440).map_or(d.unload_minutes, |m| m as u32),
+        kokoro_runtime: text("kokoro_runtime").filter(|s| s.starts_with('/') && !s.chars().any(char::is_control)).unwrap_or("").into(),
         ui_language: ui.into(),
     }
 }
@@ -98,7 +102,7 @@ pub fn check(key: &str, value: &Value) -> Result<(), String> {
         "model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
         "language" => value.as_str().is_some_and(valid_language),
         "microphone" => value.as_str().is_some_and(valid_microphone),
-        "whisper_server" => value.as_str().is_some_and(|s| s.is_empty() || s.starts_with('/')),
+        "whisper_server" | "kokoro_runtime" => value.as_str().is_some_and(|s| s.is_empty() || s.starts_with('/')),
         "ui_language" => value.as_str().is_some_and(|l| l == "system" || crate::i18n::LANGUAGES.iter().any(|(c, _)| *c == l)),
         _ => return Err(format!("unknown setting {key}")),
     };

@@ -23,5 +23,5 @@ The design is in [proposal.md](proposal.md). Each step gets its own branch and t
      - history of the last 25 sessions with a private mode, Undo chips and confirmation cards (step 5), spoken answers (step 6);
      - compositor blur behind the pill; starting pi's local model servers for `pi:` helpers (the Launcher does that).
 5. **`maprisma-actions`:** typed tools at three levels (run, confirm with Enter, never), Undo, and a log in the Manager.
-6. **Spoken answers:** `Speak` using an installed Kokoro, read-only. The Narrator stays on its own.
+6. **Spoken answers.** The service part is done, 2026-11-13: `Speak`/`StopSpeaking`, the `Speaking` signal and `maprisma-voice speak`. Checked live: Kokoro speaks two German sentences in 1.5 s, and Whisper transcribes them back word for word. Still to do: the overlay's "read answers aloud" option. Originally planned: `Speak` using an installed Kokoro, read-only. The Narrator stays on its own.
 7. **Omarchy:** the adapter `omarchy-dictation-maprisma` for Omarchy's dictation keys; an optional wake word (off by default).

@@ -73,6 +73,9 @@ pub fn why_not_key(code: &str) -> &'static str {
         "no_superwhisper" => "Superwhisper is not installed.",
         "no_omarchy" => "Omarchy dictation is not installed.",
         "no_recorder" => "No audio recorder (pw-record, parecord or arecord) was found.",
+        "no_kokoro" => "Kokoro (the Maprisma Narrator's voice) is not installed.",
+        "no_kokoro_model" => "Kokoro has no voice model yet.",
+        "no_player" => "No audio player (pw-play, paplay or aplay) was found.",
         _ => "No speech engine is set up yet.",
     }
 }
@@ -101,7 +104,7 @@ mod tests {
     #[test]
     fn every_message_used_is_a_key() {
         let en = CATALOGS[0].as_object().unwrap();
-        for code in ["", "disabled", "no_engine", "no_whisper_server", "no_model", "no_online_key", "no_voxtype", "no_superwhisper", "no_omarchy", "no_recorder"] {
+        for code in ["", "disabled", "no_engine", "no_whisper_server", "no_model", "no_online_key", "no_voxtype", "no_superwhisper", "no_omarchy", "no_recorder", "no_kokoro", "no_kokoro_model", "no_player"] {
             assert!(en.contains_key(why_not_key(code)), "{code}");
         }
         // Every tr()/trf() key in the sources is in the catalog.

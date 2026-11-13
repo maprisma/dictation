@@ -15,6 +15,7 @@ pub mod procs;
 pub mod recorder;
 pub mod service;
 pub mod settings;
+pub mod speech;
 pub mod tempwav;
 pub mod vad;
 

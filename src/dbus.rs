@@ -103,6 +103,7 @@ pub fn value_to_json(v: &Value<'_>) -> serde_json::Value {
 
 pub struct Voice {
     pub core: Arc<Core>,
+    pub speech: Arc<crate::speech::Speech>,
 }
 
 #[zbus::interface(name = "com.maprisma.Voice1")]
@@ -116,6 +117,8 @@ impl Voice {
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<String, DbusError> {
         let request = parse_request(&app_id, &mode, &options)?;
+        // Listening and speaking never overlap: a new session stops the voice at once.
+        self.speech.stop();
         let id = self.core.start_session(request).await?;
         // Cancel the session when its client leaves the bus (crashed app: no open microphone).
         if let Some(sender) = header.sender().map(|s| s.to_owned()) {
@@ -134,20 +137,43 @@ impl Voice {
     }
 
     async fn status(&self) -> HashMap<String, OwnedValue> {
-        let core = self.core.clone();
-        let map = tokio::task::spawn_blocking(move || core.status()).await.unwrap_or_default();
+        let (core, speech) = (self.core.clone(), self.speech.clone());
+        let map = tokio::task::spawn_blocking(move || {
+            let mut map = core.status();
+            let why = speech.check().err().unwrap_or("");
+            map.insert("speech_ready".into(), why.is_empty().into());
+            map.insert("speech_why_not".into(), why.into());
+            map.insert("speech_message".into(), if why.is_empty() { String::new() } else { crate::i18n::why_not(why) }.into());
+            map.insert("speaking".into(), speech.speaking().into());
+            map
+        })
+        .await
+        .unwrap_or_default();
         map.iter().filter_map(|(k, v)| OwnedValue::try_from(json_to_value(v)).ok().map(|v| (k.clone(), v))).collect()
     }
 
-    /// Reserved for spoken answers (a later step); not implemented.
-    async fn speak(&self, _text: String, _options: HashMap<String, OwnedValue>) -> Result<String, DbusError> {
-        Err(DbusError::NotSupported("Speak is not available yet".into()))
+    /// Reads `text` aloud with Kokoro (options: `language`); returns its id. `Speaking` signals
+    /// follow. Stops what was being said; refused while a session listens.
+    async fn speak(&self, text: String, options: HashMap<String, OwnedValue>) -> Result<String, DbusError> {
+        if self.core.status().get("state").and_then(serde_json::Value::as_str) == Some("listening") {
+            return Err(DbusError::Failed("busy: listening".into()));
+        }
+        let language = text_option(&options, "language")?.unwrap_or("auto").to_string();
+        if !crate::settings::valid_language(&language) {
+            return Err(DbusError::InvalidArgs("language".into()));
+        }
+        let speech = self.speech.clone();
+        Ok(tokio::task::spawn_blocking(move || speech.speak(&text, &language, 1.0)).await.map_err(|e| DbusError::Failed(e.to_string()))??)
     }
 
-    /// Reserved (a later step); not implemented.
     async fn stop_speaking(&self) -> Result<(), DbusError> {
-        Err(DbusError::NotSupported("StopSpeaking is not available yet".into()))
+        self.speech.stop();
+        Ok(())
     }
+
+    /// A speech's state: `speaking`, `done`, `stopped` or `error` (with a message).
+    #[zbus(signal)]
+    pub async fn speaking(emitter: &SignalEmitter<'_>, speak_id: &str, state: &str, message: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn partial(emitter: &SignalEmitter<'_>, session_id: &str, text: &str) -> zbus::Result<()>;
@@ -232,11 +258,13 @@ async fn forward(connection: zbus::Connection, mut events: tokio::sync::mpsc::Un
 
 /// `maprisma-voice daemon`: owns the name until SIGTERM/SIGINT or the bus goes away.
 pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
+    let (speech_tx, mut speech_rx) = tokio::sync::mpsc::unbounded_channel();
+    let speech = crate::speech::Speech::new(dirs.clone(), speech_tx);
     let backend = Arc::new(crate::service::RealBackend::new(dirs));
     let (core, events) = Core::new(backend.clone(), crate::vad::VadConfig::default());
     let connection = zbus::connection::Builder::session()
         .map_err(|e| e.to_string())?
-        .serve_at(PATH, Voice { core: core.clone() })
+        .serve_at(PATH, Voice { core: core.clone(), speech: speech.clone() })
         .map_err(|e| e.to_string())?
         .build()
         .await
@@ -247,10 +275,17 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
         Err(e) => return Err(e.to_string()),
     }
     tokio::spawn(forward(connection.clone(), events));
+    let speech_connection = connection.clone();
+    tokio::spawn(async move {
+        let Ok(emitter) = SignalEmitter::new(&speech_connection, PATH) else { return };
+        while let Some(crate::speech::SpeechEvent::State { id, state, message }) = speech_rx.recv().await {
+            let _ = Voice::speaking(&emitter, &id, state, &message).await;
+        }
+    });
     let preload = backend.clone();
     tokio::task::spawn_blocking(move || preload.preload());
     // Idle unloading: checked every minute, never while a session lives.
-    let (idle_backend, idle_core) = (backend.clone(), core.clone());
+    let (idle_backend, idle_core, idle_speech) = (backend.clone(), core.clone(), speech.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -258,6 +293,10 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
             if idle_core.status().get("sessions").and_then(serde_json::Value::as_u64) == Some(0) {
                 let b = idle_backend.clone();
                 let _ = tokio::task::spawn_blocking(move || b.unload_if_idle()).await;
+                let minutes = crate::settings::load(&idle_backend.dirs).unload_minutes;
+                if minutes > 0 {
+                    idle_speech.unload_if_idle(std::time::Duration::from_secs(60 * u64::from(minutes)));
+                }
             }
         }
     });
@@ -274,6 +313,7 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
     }
     let b = backend.clone();
     let _ = tokio::task::spawn_blocking(move || b.stop()).await;
+    speech.shutdown();
     Ok(())
 }
 

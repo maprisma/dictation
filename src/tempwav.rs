@@ -16,7 +16,7 @@ impl TempWav {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         static N: AtomicU64 = AtomicU64::new(0);
-        let dir = folder(dirs)?;
+        let dir = private_folder(dirs)?;
         let path = dir.join(format!("utterance-{}-{}.wav", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
         let guard = TempWav(path);
@@ -33,7 +33,7 @@ impl Drop for TempWav {
 }
 
 /// `$XDG_RUNTIME_DIR/maprisma-voice` (else `/tmp/maprisma-voice-<uid>`), 0700, ours, no symlink.
-fn folder(dirs: &Dirs) -> std::io::Result<PathBuf> {
+pub fn private_folder(dirs: &Dirs) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     // SAFETY: getuid never fails.
     let uid = unsafe { libc::getuid() };
