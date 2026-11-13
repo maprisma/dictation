@@ -972,10 +972,10 @@ fn ui_language(setting: &str) -> String {
 /// in it (a descendant that ignores SIGTERM), on a thread of its own so the UI never waits.
 fn kill_helper() {
     let group = HELPER_GROUP.swap(0, Ordering::SeqCst);
-    if group > 0 {
-        if let Ok(handle) = std::thread::Builder::new().name("helper-kill".into()).spawn(move || crate::procgroup::terminate(group, HELPER_GRACE)) {
-            HELPER_KILLS.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
-        }
+    if group > 0
+        && let Ok(handle) = std::thread::Builder::new().name("helper-kill".into()).spawn(move || crate::procgroup::terminate(group, HELPER_GRACE))
+    {
+        HELPER_KILLS.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
     }
 }
 
