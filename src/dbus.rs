@@ -249,6 +249,18 @@ pub async fn run_daemon(dirs: crate::paths::Dirs) -> Result<(), String> {
     tokio::spawn(forward(connection.clone(), events));
     let preload = backend.clone();
     tokio::task::spawn_blocking(move || preload.preload());
+    // Idle unloading: checked every minute, never while a session lives.
+    let (idle_backend, idle_core) = (backend.clone(), core.clone());
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if idle_core.status().get("sessions").and_then(serde_json::Value::as_u64) == Some(0) {
+                let b = idle_backend.clone();
+                let _ = tokio::task::spawn_blocking(move || b.unload_if_idle()).await;
+            }
+        }
+    });
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|e| e.to_string())?;
     // The bus going away ends us too (the connection's executor stops).

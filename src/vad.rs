@@ -1,7 +1,7 @@
 //! A simple energy voice activity detector, driven by audio time (not the clock), so it behaves
 //! the same live and in tests.
 //!
-//! A chunk is speech when its RMS is above `max(min_threshold, noise floor × ratio)`; the noise
+//! In the first 250 ms quiet chunks (below 0.05) only teach the noise floor. A chunk is speech when its RMS is above `max(min_threshold, noise floor × ratio)`; the noise
 //! floor follows the quiet chunks. Speech counts as started after `min_speech_ms` of speech in a
 //! row. With `end = silence`: finish after `silence_ms` of quiet once speech was heard, cancel
 //! after `initial_ms` without speech. Both modes stop at `max_ms`.
@@ -14,11 +14,14 @@ pub struct VadConfig {
     pub min_speech_ms: u32,
     pub min_threshold: f64,
     pub ratio: f64,
+    /// The first ms: chunks below `calibration_ceiling` only teach the noise floor.
+    pub calibration_ms: u32,
+    pub calibration_ceiling: f64,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
-        VadConfig { silence_ms: 900, initial_ms: 4000, max_ms: 60_000, min_speech_ms: 150, min_threshold: 0.012, ratio: 3.0 }
+        VadConfig { silence_ms: 900, initial_ms: 4000, max_ms: 60_000, min_speech_ms: 150, min_threshold: 0.012, ratio: 3.0, calibration_ms: 250, calibration_ceiling: 0.05 }
     }
 }
 
@@ -65,7 +68,10 @@ impl Vad {
     /// One chunk's level and length.
     pub fn feed(&mut self, rms: f64, ms: u32) -> Decision {
         self.elapsed_ms += ms;
-        let speech = rms > self.threshold();
+        // A noisy room above min_threshold would otherwise count as speech from the start and
+        // the floor would never learn it.
+        let calibrating = self.elapsed_ms <= self.cfg.calibration_ms && rms < self.cfg.calibration_ceiling;
+        let speech = !calibrating && rms > self.threshold();
         if speech {
             self.speech_run_ms += ms;
             self.silence_run_ms = 0;
@@ -78,6 +84,7 @@ impl Vad {
             // The floor learns only from quiet chunks, slowly, and never from loud ones.
             self.noise = Some(match self.noise {
                 None => rms,
+                Some(n) if calibrating => n.max(rms),
                 Some(n) => n * 0.95 + rms.min(0.05) * 0.05,
             });
         }

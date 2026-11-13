@@ -29,12 +29,15 @@ struct Running {
 #[derive(Default)]
 pub struct WhisperServer {
     state: Mutex<Option<Running>>,
+    /// When it was last asked for (ensure); for unloading when idle.
+    used: Mutex<Option<Instant>>,
 }
 
 impl WhisperServer {
     /// The port of a running server for this binary and model; starts (or restarts) it when
     /// needed. Callers wait while it loads.
     pub fn ensure(&self, binary: &Path, model: &Path) -> Result<u16, VoiceError> {
+        *self.used.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(running) = state.as_mut() {
             if running.binary == binary && running.model == model && running.child.alive() {
@@ -55,6 +58,22 @@ impl WhisperServer {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let r = state.as_mut()?;
         if r.child.alive() { Some((r.port, r.model.clone())) } else { None }
+    }
+
+    /// Stops a running server not asked for in `idle` (frees the model's memory); true when it did.
+    pub fn unload_if_idle(&self, idle: Duration) -> bool {
+        let used = *self.used.lock().unwrap_or_else(|e| e.into_inner());
+        if used.is_some_and(|t| t.elapsed() < idle) {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.take() {
+            Some(mut running) => {
+                running.child.kill();
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn stop(&self) {
@@ -253,7 +272,7 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
                     }
                 }
             }
-            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n{\"text\": \" Guten Morgen.\"}").unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 26\r\n\r\n{\"text\": \" Guten Morgen.\"}").unwrap();
             String::from_utf8_lossy(&raw).into_owned()
         });
         let text = infer(port, &crate::audio::wav_bytes(&[1, 2, 3]), "de").unwrap();
@@ -306,6 +325,14 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
         std::fs::write(&other, "x").unwrap();
         server.ensure(&binary, &other).unwrap();
         assert_eq!(server.running().unwrap().1, other);
+        // Idle unloading: not while recently used, then it frees the server.
+        assert!(!server.unload_if_idle(Duration::from_secs(60)));
+        assert!(server.running().is_some());
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(server.unload_if_idle(Duration::from_millis(10)));
+        assert!(server.running().is_none());
+        assert!(!server.unload_if_idle(Duration::from_millis(10)));
+        server.ensure(&binary, &other).unwrap();
         server.stop();
         assert!(server.running().is_none());
         // A model it can't load: the error says why.

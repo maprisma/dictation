@@ -43,6 +43,14 @@ impl RealBackend {
     pub fn stop(&self) {
         self.server.stop();
     }
+
+    /// Frees the engine's memory after `unload_minutes` without a session. Blocking.
+    pub fn unload_if_idle(&self) {
+        let minutes = settings::load(&self.dirs).unload_minutes;
+        if minutes > 0 && self.server.unload_if_idle(std::time::Duration::from_secs(60 * u64::from(minutes))) {
+            eprintln!("maprisma-voice: whisper-server unloaded after {minutes} idle minutes");
+        }
+    }
 }
 
 /// The engine object for a choice.

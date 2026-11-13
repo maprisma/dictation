@@ -23,6 +23,8 @@ pub struct Settings {
     pub whisper_server: String,
     /// Start whisper-server (and load the model) when the daemon starts, not at the first session.
     pub preload: bool,
+    /// Stop whisper-server (and free its GPU memory) after this many idle minutes; 0 keeps it.
+    pub unload_minutes: u32,
     /// The language of the service's own messages: `system` or one of the 8 codes.
     pub ui_language: String,
 }
@@ -37,6 +39,7 @@ impl Default for Settings {
             microphone: "default".into(),
             whisper_server: String::new(),
             preload: false,
+            unload_minutes: 10,
             ui_language: "system".into(),
         }
     }
@@ -69,6 +72,7 @@ pub fn parse(value: &Value) -> Settings {
         microphone: microphone.into(),
         whisper_server: server.into(),
         preload: value.get("preload").and_then(Value::as_bool).unwrap_or(d.preload),
+        unload_minutes: value.get("unload_minutes").and_then(Value::as_u64).filter(|m| *m <= 1440).map_or(d.unload_minutes, |m| m as u32),
         ui_language: ui.into(),
     }
 }
@@ -89,6 +93,7 @@ pub fn load(dirs: &Dirs) -> Settings {
 pub fn check(key: &str, value: &Value) -> Result<(), String> {
     let ok = match key {
         "enabled" | "preload" => value.is_boolean(),
+        "unload_minutes" => value.as_u64().is_some_and(|m| m <= 1440),
         "engine" => value.as_str().is_some_and(|e| ENGINES.contains(&e)),
         "model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
         "language" => value.as_str().is_some_and(valid_language),
