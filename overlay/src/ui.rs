@@ -876,7 +876,7 @@ impl Overlay {
                 ]);
                 if !output.is_empty() {
                     let shown: String = output.chars().take(4000).collect();
-                    c = c.push(container(text::body(shown).font(cosmic::font::mono()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
+                    c = c.push(container(text::body(shown).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
                 }
                 c.into()
             }
@@ -895,7 +895,7 @@ impl Overlay {
         let mut c = cosmic::iced::widget::Column::new().spacing(6).push(row![text::body("!").class(theme::Text::Custom(warning_text)).width(Length::Fixed(16.0)), text::heading(what)]);
         match &item.action {
             Some(schema::Action::RunCommand { argv, why }) => {
-                c = c.push(container(text::body(shell_words(argv)).font(cosmic::font::mono()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
+                c = c.push(container(text::body(shell_words(argv)).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
                 if !why.is_empty() {
                     c = c.push(text::caption(why.clone()).class(theme::Text::Custom(dim_text)));
                 }
@@ -1080,7 +1080,7 @@ fn rich(raw: &str, size: f32, line: f32, weight: cosmic::iced::font::Weight) -> 
         .map(|s| {
             if s.code {
                 return span(s.text)
-                    .font(cosmic::font::Font { weight: if s.bold { Weight::Bold } else { Weight::Normal }, ..cosmic::font::mono() })
+                    .font(cosmic::font::Font { weight: if s.bold { Weight::Bold } else { Weight::Normal }, ..crate::look::mono_font() })
                     .size(size * 0.88)
                     .background(tint)
                     .border(Border { radius: corners::now().small.into(), ..Default::default() })
@@ -1111,7 +1111,7 @@ fn block_view(block: &Block, kind: Type) -> Element<'static, Message> {
             ]
             .into()
         }
-        Block::Code(t) => container(text::body(t.clone()).font(cosmic::font::mono()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)).into(),
+        Block::Code(t) => container(text::body(t.clone()).font(crate::look::mono_font()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)).into(),
     }
 }
 
@@ -1792,10 +1792,12 @@ impl cosmic::Application for Overlay {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        crate::look::keep_fonts();
         space::horizontal().width(Length::Fixed(1.0)).into()
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
+        crate::look::keep_fonts();
         if Some(id) == self.catcher {
             return mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill)).on_press(Message::ClickOutside).into();
         }

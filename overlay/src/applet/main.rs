@@ -23,6 +23,7 @@ static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dictation-autosize"
 const POPUP_WIDTH: f32 = 300.0;
 
 fn main() -> cosmic::iced::Result {
+    look::keep_fonts();
     cosmic::applet::run::<Applet>(())
 }
 
@@ -210,6 +211,7 @@ impl cosmic::Application for Applet {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        look::keep_fonts();
         let horizontal = matches!(self.core.applet.anchor, PanelAnchor::Top | PanelAnchor::Bottom);
         let padding = self.core.applet.suggested_padding(true).0;
         let size = self.core.applet.suggested_size(true).0;
@@ -233,6 +235,7 @@ impl cosmic::Application for Applet {
     }
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
+        look::keep_fonts();
         corners::apply(&self.corners, self.core.applet.popup_container(self.popup_content()))
     }
 
