@@ -1376,6 +1376,8 @@ impl cosmic::Application for Overlay {
     }
 
     fn init(core: Core, flags: Flags) -> (Self, Task<Message>) {
+        let mut core = core;
+        crate::look::solid(&mut core);
         let settings = settings::read();
         maprisma_voice::i18n::set_language(&settings.language);
         corners::set_current(&settings.corners);
