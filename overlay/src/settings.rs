@@ -1,6 +1,7 @@
 //! The overlay's settings, `$XDG_CONFIG_HOME/maprisma-dictation/settings.json` (a JSON object;
 //! a missing or broken file or value falls back to the default). The overlay only reads them;
-//! Maprisma Settings' Voice page (step 2) writes them, keeping keys it doesn't know.
+//! Maprisma Settings' Voice page (step 2) and the applet's settings page (Language, F12, Corners)
+//! write them, keeping keys they don't know.
 //!
 //! | key | default | meaning |
 //! |---|---|---|
@@ -92,6 +93,34 @@ pub fn read() -> Settings {
     }
 }
 
+/// `object` with `key` set to `value` (every other key kept; anything but an object starts as `{}`).
+pub fn with_key(bytes: &[u8], key: &str, value: Value) -> Value {
+    let mut object = match serde_json::from_slice::<Value>(bytes) {
+        Ok(Value::Object(o)) => o,
+        _ => serde_json::Map::new(),
+    };
+    object.insert(key.into(), value);
+    Value::Object(object)
+}
+
+/// Sets one key in the settings file (read–modify–write, atomic, 0700 folder, 0600 file).
+pub fn set(key: &str, value: Value) -> std::io::Result<()> {
+    use std::io::Read;
+    let path = crate::paths::settings_file();
+    let mut bytes = vec![];
+    if let Ok(f) = std::fs::File::open(&path) {
+        let _ = f.take(FILE_MAX + 1).read_to_end(&mut bytes);
+    }
+    // Never replace a file too big to read whole (its other keys would be lost).
+    if bytes.len() as u64 > FILE_MAX {
+        return Err(std::io::Error::other("the settings file is too large"));
+    }
+    maprisma_voice::paths::private_dir(path.parent().unwrap())?;
+    let mut out = serde_json::to_vec_pretty(&with_key(&bytes, key, value))?;
+    out.push(b'\n');
+    maprisma_voice::paths::write_atomic(&path, &out, 0o600)
+}
+
 /// Whether the desktop asks for less motion: Plasma's animation speed at 0 (kdeglobals
 /// `[KDE] AnimationDurationFactor=0`), Hyprland's `animations:enabled` off, GNOME/GTK's
 /// `enable-animations` off (also read by COSMIC apps through gsettings when present).
@@ -177,6 +206,14 @@ mod tests {
         );
         let s = parse(br#"{"language": "xx", "corners": "bogus", "motion": 3, "listen": "no", "actions": "no", "speak_answers": 1, "weather_location": 5}"#);
         assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn one_key_changes_the_rest_stays() {
+        let v = with_key(br#"{"corners": "square", "other": 1}"#, "language", Value::from("de"));
+        assert_eq!(v, serde_json::json!({"corners": "square", "other": 1, "language": "de"}));
+        assert_eq!(with_key(b"[1]", "screenshot_key", Value::from(false)), serde_json::json!({"screenshot_key": false}));
+        assert_eq!(parse(&serde_json::to_vec(&v).unwrap()).language, "de");
     }
 
     #[test]

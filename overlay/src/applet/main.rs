@@ -1,11 +1,12 @@
 //! maprisma-dictation-applet: Maprisma Dictation's icon in the COSMIC panel. A click opens the
 //! overlay (it listens at once) or closes it: `maprisma-dictation --toggle`, the overlay's own
 //! toggle. A right click opens a small menu: open/close dictation, Voice settings… (Maprisma
-//! Manager's Voice page). The icon follows the overlay and the voice service (src/bar.rs).
+//! Manager's Voice page), and a gear in its header for the settings page (Language, F12,
+//! Corners). The icon follows the overlay and the voice service (src/bar.rs).
 
 use maprisma_dictation::bar::{self, Command, Shown};
 use maprisma_dictation::{corners, look, settings};
-use maprisma_voice::i18n::tr;
+use maprisma_voice::i18n::{LANGUAGES, tr, trf};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -14,9 +15,10 @@ use cosmic::applet::cosmic_panel_config::PanelAnchor;
 use cosmic::applet::{menu_button, padded_control};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::destroy_popup;
 use cosmic::iced::widget::svg as iced_svg;
-use cosmic::iced::{Alignment, Length, Rectangle, Subscription, window};
+use cosmic::iced::widget::text as iced_text;
+use cosmic::iced::{Alignment, Color, Length, Rectangle, Subscription, window};
 use cosmic::widget::rectangle_tracker::{RectangleTracker, RectangleUpdate, rectangle_tracker_subscription};
-use cosmic::widget::{Id, autosize, button, column, divider, icon, mouse_area, row, text};
+use cosmic::widget::{Id, autosize, button, column, divider, icon, mouse_area, row, scrollable, space, text};
 use cosmic::{Element, theme};
 
 static AUTOSIZE_ID: LazyLock<Id> = LazyLock::new(|| Id::new("dictation-autosize"));
@@ -32,7 +34,14 @@ struct Applet {
     core: Core,
     shown: Shown,
     corners: String,
+    language: String,
+    screenshot_key: bool,
     popup: Option<window::Id>,
+    /// The settings page (Language, F12, Corners) is shown instead of the menu.
+    settings_open: bool,
+    language_open: bool,
+    corners_open: bool,
+    setting_error: bool,
     rectangle: Rectangle,
     tracker: Option<RectangleTracker<u32>>,
 }
@@ -46,6 +55,12 @@ enum Message {
     /// "Open dictation" / "Close dictation" in the menu.
     MenuToggle,
     Settings,
+    ToggleSettings,
+    ToggleLanguage,
+    ToggleCorners,
+    Language(String),
+    Corners(String),
+    SetShotKey(bool),
     Shown(Shown),
     Tick,
     Escape(window::Id),
@@ -70,6 +85,41 @@ fn watch() -> Subscription<Message> {
     })
 }
 
+/// What Esc does next (layout rule 5a): an open list first, then Back from the settings page,
+/// then the popup closes. `shown`: Esc came from the open popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscStep {
+    Menus,
+    Back,
+    Close,
+    Nothing,
+}
+
+fn esc_step(menus: bool, settings: bool, shown: bool) -> EscStep {
+    if !shown {
+        EscStep::Nothing
+    } else if menus {
+        EscStep::Menus
+    } else if settings {
+        EscStep::Back
+    } else {
+        EscStep::Close
+    }
+}
+
+fn dim_text(theme: &cosmic::Theme) -> iced_text::Style {
+    let mut color = Color::from(theme.cosmic().on_bg_color());
+    color.a = 0.6;
+    iced_text::Style { color: Some(color), ..Default::default() }
+}
+
+/// The system language's name, for "System (…)".
+fn system_language_name() -> &'static str {
+    let values = ["LC_ALL", "LC_MESSAGES", "LANG"].map(|k| std::env::var(k).unwrap_or_default());
+    let code = maprisma_voice::i18n::system_language([&values[0], &values[1], &values[2]]);
+    LANGUAGES.iter().find(|(c, _)| *c == code).map_or("English", |(_, n)| *n)
+}
+
 fn spawn(command: Command) {
     if let Err(e) = command.spawn() {
         eprintln!("maprisma-dictation-applet: could not start {}: {e}", command.program.display());
@@ -83,19 +133,92 @@ impl Applet {
         maprisma_voice::i18n::set_language(&s.language);
         corners::set_current(&s.corners);
         self.corners = s.corners;
+        self.language = s.language;
+        self.screenshot_key = s.screenshot_key;
+    }
+
+    /// Saves one setting to the overlay's settings file, then reads them all again.
+    fn save(&mut self, key: &str, value: serde_json::Value) {
+        self.setting_error = settings::set(key, value).is_err();
+        self.reload();
     }
 
     fn close_popup(&mut self) -> Task<Message> {
+        self.settings_open = false;
+        self.language_open = false;
+        self.corners_open = false;
         match self.popup.take() {
             Some(id) => destroy_popup(id),
             None => Task::none(),
         }
     }
 
+    /// Settings (as Maprisma Launcher's page): ← Back and the title, then one row per setting,
+    /// words at the left and the control at the right; a list opens under its row.
+    fn settings_page(&self) -> Element<'_, Message> {
+        let header = row![
+            button::text(tr("Back")).leading_icon(icon::from_name("go-previous-symbolic").size(16)).on_press(Message::ToggleSettings),
+            space::horizontal().width(Length::Fill),
+            text::caption(tr("Settings").to_uppercase()).class(theme::Text::Custom(dim_text)),
+        ]
+        .align_y(Alignment::Center);
+        let choice = |label: String, open: bool, message: Message| -> Element<'static, Message> {
+            button::text(label)
+                .trailing_icon(icon::from_name(if open { "pan-up-symbolic" } else { "pan-down-symbolic" }).size(16))
+                .on_press(message)
+                .into()
+        };
+        let setting = |label: String, control: Element<'static, Message>| {
+            padded_control(row![text::body(label), space::horizontal().width(Length::Fill), control].spacing(12).align_y(Alignment::Center))
+        };
+        let languages: Vec<(String, String)> = std::iter::once(("system".to_string(), trf("System ({0})", &[system_language_name()])))
+            .chain(LANGUAGES.iter().map(|(c, n)| (c.to_string(), n.to_string())))
+            .collect();
+        let current = languages.iter().find(|(c, _)| *c == self.language).map(|(_, l)| l.clone()).unwrap_or_default();
+        let mut page = column![padded_control(header), padded_control(divider::horizontal::default())];
+        page = page.push(setting(tr("Language"), choice(current, self.language_open, Message::ToggleLanguage)));
+        if self.language_open {
+            for (code, label) in languages {
+                let label = if code == self.language { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::Language(code)));
+            }
+        }
+        page = page.push(setting(tr("F12 saves a screenshot"), cosmic::widget::toggler(self.screenshot_key).on_toggle(Message::SetShotKey).into()));
+        let desktop = corners::desktop_radius().round().to_string();
+        let corner_choices = [
+            ("desktop", trf("Like the desktop ({0} px)", &[&desktop])),
+            ("slight", trf("Slightly rounded ({0} px)", &["6"])),
+            ("rounded", trf("Rounded ({0} px)", &["12"])),
+            ("square", tr("Square")),
+        ];
+        let current = corner_choices.iter().find(|(c, _)| *c == self.corners).map(|(_, l)| l.clone()).unwrap_or_default();
+        page = page.push(setting(tr("Corners"), choice(current, self.corners_open, Message::ToggleCorners)));
+        if self.corners_open {
+            for (choice, label) in corner_choices {
+                let label = if self.corners == choice { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::Corners(choice.into())));
+            }
+        }
+        if self.setting_error {
+            page = page.push(padded_control(text::body(tr("Could not save the setting."))));
+        }
+        scrollable(page.padding([8, 0]).width(Length::Fixed(POPUP_WIDTH))).into()
+    }
+
     fn popup_content(&self) -> Element<'_, Message> {
+        if self.settings_open {
+            return self.settings_page();
+        }
         let header = row![
             icon::from_name(self.shown.icon()).size(24).symbolic(true),
             column![text::heading(tr("Maprisma Dictation")), text::caption(self.shown.status())].spacing(2),
+            space::horizontal().width(Length::Fill),
+            // Settings at the header's right end, as in Maprisma Launcher.
+            cosmic::widget::tooltip(
+                button::icon(icon::from_name("emblem-system-symbolic").symbolic(true)).on_press(Message::ToggleSettings),
+                text::body(tr("Settings")),
+                cosmic::widget::tooltip::Position::Bottom,
+            ),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
@@ -128,6 +251,8 @@ impl cosmic::Application for Applet {
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
         let mut app = Self { core, ..Default::default() };
         app.reload();
+        // Debug builds only: start on the settings page (for off-screen screenshots).
+        app.settings_open = cfg!(debug_assertions) && std::env::var("MAPRISMA_SHOT_PAGE").as_deref() == Ok("settings");
         look::reload();
         (app, Task::none())
     }
@@ -141,7 +266,7 @@ impl cosmic::Application for Applet {
             watch(),
             cosmic::iced::time::every(Duration::from_secs(5)).map(|_| Message::Tick),
             rectangle_tracker_subscription(0).map(|update| Message::Rectangle(update.1)),
-            // Esc closes the menu (layout rule 5a; it has nothing inside to close first).
+            // Esc: an open list, then Back from the settings page, then the menu closes (layout rule 5a).
             cosmic::iced::event::listen_with(|event, status, id| match event {
                 cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed { key: cosmic::iced::keyboard::Key::Named(cosmic::iced::keyboard::key::Named::Escape), .. })
                     if status == cosmic::iced::event::Status::Ignored =>
@@ -172,14 +297,43 @@ impl cosmic::Application for Applet {
                 self.reload();
                 look::refresh();
             }
-            Message::Escape(id) => {
-                if self.popup == Some(id) {
-                    return self.close_popup();
+            Message::Escape(id) => match esc_step(self.language_open || self.corners_open, self.settings_open, self.popup == Some(id)) {
+                EscStep::Menus => {
+                    self.language_open = false;
+                    self.corners_open = false;
                 }
+                EscStep::Back => self.settings_open = false,
+                EscStep::Close => return self.close_popup(),
+                EscStep::Nothing => {}
+            },
+            Message::ToggleSettings => {
+                self.settings_open = !self.settings_open;
+                self.language_open = false;
+                self.corners_open = false;
             }
+            Message::ToggleLanguage => {
+                self.language_open = !self.language_open;
+                self.corners_open = false;
+            }
+            Message::ToggleCorners => {
+                self.corners_open = !self.corners_open;
+                self.language_open = false;
+            }
+            Message::Language(code) => {
+                self.language_open = false;
+                self.save("language", code.into());
+            }
+            Message::Corners(choice) => {
+                self.corners_open = false;
+                self.save("corners", choice.into());
+            }
+            Message::SetShotKey(on) => self.save("screenshot_key", on.into()),
             Message::Closed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
+                    self.settings_open = false;
+                    self.language_open = false;
+                    self.corners_open = false;
                 }
             }
             Message::Rectangle(update) => match update {
@@ -241,5 +395,20 @@ impl cosmic::Application for Applet {
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn esc_closes_the_innermost_thing_first() {
+        assert_eq!(esc_step(true, true, true), EscStep::Menus);
+        assert_eq!(esc_step(false, true, true), EscStep::Back);
+        assert_eq!(esc_step(false, false, true), EscStep::Close);
+        // Not from the open popup (e.g. the panel button): nothing.
+        assert_eq!(esc_step(true, true, false), EscStep::Nothing);
+        assert_eq!(esc_step(false, false, false), EscStep::Nothing);
     }
 }

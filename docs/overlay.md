@@ -282,7 +282,7 @@ key and the Launcher take the same path (`src/bar.rs`).
 |---|---|---|---|
 | Program | `maprisma-dictation-applet`, applet `io.github.ubruckhaus.CosmicMaprismaDictation` (add it in Settings › Desktop › Panel › Applets) | `maprisma-dictation-tray`, an SNI with Id `maprisma-dictation`, autostart `OnlyShowIn=KDE;Hyprland;` | the same tray, shown by the shell's tray (`tray:maprisma-dictation` in bar.json) |
 | Left click | open (and listen) / close | the same | the same |
-| Right click | a menu: Open/Close dictation, Voice settings… (`maprisma-settings --page voice`); Esc closes it | the same menu, plus Quit tray | the same as KDE |
+| Right click | a menu: Open/Close dictation, Voice settings… (`maprisma-settings --page voice`), and a gear at the header's right end for the settings page (Language, F12 saves a screenshot, Corners; written to settings.json); Esc closes an open list, then leaves the settings page, then closes the menu | the same menu, plus Quit tray | the same as KDE |
 | Middle click | – | – | – |
 
 Its title starts with "Maprisma" in every language, so KDE's "Maprisma Icons" widget picks it up
