@@ -7,6 +7,7 @@
 //! |---|---|---|
 //! | `language` | `system` | `system`, `en`, `de`, `fr`, `es`, `it`, `pt`, `nl` or `pl` |
 //! | `corners` | `desktop` | `desktop`, `slight`, `rounded` or `square` (pill radius clamped 12–26 unless square) |
+//! | `skin` | `native` | `native`, `synthwave`, `cozy`, `terminal`, `disco` or `zen` |
 //! | `motion` | `desktop` | `desktop` (follow the desktop's reduced-motion setting), `full` or `reduced` |
 //! | `listen` | `true` | start listening when the overlay opens |
 //! | `end` | `silence` | how a tapped (toggle) session ends: `silence` or `release` |
@@ -25,6 +26,7 @@ const FILE_MAX: u64 = 64 * 1024;
 pub struct Settings {
     pub language: String,
     pub corners: String,
+    pub skin: String,
     pub motion: Motion,
     pub listen: bool,
     pub end_silence: bool,
@@ -45,7 +47,20 @@ pub enum Motion {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { language: "system".into(), corners: "desktop".into(), motion: Motion::Desktop, listen: true, end_silence: true, screenshot_key: true, keyboard_exclusive: false, actions: true, confirm_all: false, weather_location: String::new(), speak_answers: false }
+        Settings {
+            language: "system".into(),
+            corners: "desktop".into(),
+            skin: "native".into(),
+            motion: Motion::Desktop,
+            listen: true,
+            end_silence: true,
+            screenshot_key: true,
+            keyboard_exclusive: false,
+            actions: true,
+            confirm_all: false,
+            weather_location: String::new(),
+            speak_answers: false,
+        }
     }
 }
 
@@ -58,6 +73,9 @@ pub fn parse(bytes: &[u8]) -> Settings {
     }
     if let Some(c) = text("corners") {
         s.corners = crate::corners::normalize(c).into();
+    }
+    if let Some(sk) = text(crate::skin::SKIN_KEY) {
+        s.skin = crate::skin::normalize_skin(sk).into();
     }
     s.motion = match text("motion") {
         Some("full") => Motion::Full,
@@ -93,18 +111,32 @@ pub fn read() -> Settings {
     }
 }
 
-/// `object` with `key` set to `value` (every other key kept; anything but an object starts as `{}`).
-pub fn with_key(bytes: &[u8], key: &str, value: Value) -> Value {
+/// `object` with `key` set to `Some(value)` or removed on `None` (every other key kept; anything
+/// but an object starts as `{}`).
+pub fn with_key_opt(bytes: &[u8], key: &str, value: Option<Value>) -> Value {
     let mut object = match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
     };
-    object.insert(key.into(), value);
+    match value {
+        Some(v) => {
+            object.insert(key.into(), v);
+        }
+        None => {
+            object.remove(key);
+        }
+    }
     Value::Object(object)
 }
 
-/// Sets one key in the settings file (read–modify–write, atomic, 0700 folder, 0600 file).
-pub fn set(key: &str, value: Value) -> std::io::Result<()> {
+/// `object` with `key` set to `value` (every other key kept; anything but an object starts as `{}`).
+pub fn with_key(bytes: &[u8], key: &str, value: Value) -> Value {
+    with_key_opt(bytes, key, Some(value))
+}
+
+/// Sets (`Some`) or removes (`None`) one key in the settings file (read–modify–write, atomic,
+/// 0700 folder, 0600 file).
+pub fn set_opt(key: &str, value: Option<Value>) -> std::io::Result<()> {
     use std::io::Read;
     let path = crate::paths::settings_file();
     let mut bytes = vec![];
@@ -116,9 +148,14 @@ pub fn set(key: &str, value: Value) -> std::io::Result<()> {
         return Err(std::io::Error::other("the settings file is too large"));
     }
     maprisma_voice::paths::private_dir(path.parent().unwrap())?;
-    let mut out = serde_json::to_vec_pretty(&with_key(&bytes, key, value))?;
+    let mut out = serde_json::to_vec_pretty(&with_key_opt(&bytes, key, value))?;
     out.push(b'\n');
     maprisma_voice::paths::write_atomic(&path, &out, 0o600)
+}
+
+/// Sets one key in the settings file (read–modify–write, atomic, 0700 folder, 0600 file).
+pub fn set(key: &str, value: Value) -> std::io::Result<()> {
+    set_opt(key, Some(value))
 }
 
 /// Whether the desktop asks for less motion: Plasma's animation speed at 0 (kdeglobals
@@ -186,13 +223,14 @@ mod tests {
     fn defaults_and_broken_values() {
         assert_eq!(parse(b""), Settings::default());
         assert_eq!(parse(b"[1]"), Settings::default());
-        let s = parse(br#"{"language": "de", "corners": "square", "motion": "reduced", "listen": false, "end": "release", "screenshot_key": false, "keyboard": "exclusive", "other": 1,
+        let s = parse(br#"{"language": "de", "corners": "square", "skin": "synthwave", "motion": "reduced", "listen": false, "end": "release", "screenshot_key": false, "keyboard": "exclusive", "other": 1,
             "actions": false, "confirm_all": true, "weather_location": " Hamburg ", "speak_answers": true}"#);
         assert_eq!(
             s,
             Settings {
                 language: "de".into(),
                 corners: "square".into(),
+                skin: "synthwave".into(),
                 motion: Motion::Reduced,
                 listen: false,
                 end_silence: false,
@@ -204,7 +242,7 @@ mod tests {
                 speak_answers: true
             }
         );
-        let s = parse(br#"{"language": "xx", "corners": "bogus", "motion": 3, "listen": "no", "actions": "no", "speak_answers": 1, "weather_location": 5}"#);
+        let s = parse(br#"{"language": "xx", "corners": "bogus", "skin": "bogus", "motion": 3, "listen": "no", "actions": "no", "speak_answers": 1, "weather_location": 5}"#);
         assert_eq!(s, Settings::default());
     }
 
@@ -214,6 +252,8 @@ mod tests {
         assert_eq!(v, serde_json::json!({"corners": "square", "other": 1, "language": "de"}));
         assert_eq!(with_key(b"[1]", "screenshot_key", Value::from(false)), serde_json::json!({"screenshot_key": false}));
         assert_eq!(parse(&serde_json::to_vec(&v).unwrap()).language, "de");
+        let cleared = with_key_opt(br#"{"skin": "disco", "other": 1}"#, "skin", None);
+        assert_eq!(cleared, serde_json::json!({"other": 1}));
     }
 
     #[test]

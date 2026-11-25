@@ -3264,7 +3264,7 @@ dependencies = [
 
 [[package]]
 name = "maprisma-dictation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "libc",
@@ -3279,7 +3279,7 @@ dependencies = [
 
 [[package]]
 name = "maprisma-voice"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "libc",

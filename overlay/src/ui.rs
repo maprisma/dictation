@@ -13,7 +13,7 @@ use crate::markdown::{self, Block};
 use crate::settings::{self, Settings};
 use crate::state::{Effect, End, Event, Machine, Phase};
 use crate::voice::{self, Control, Controls, SpeakEvent, VoiceEvent};
-use crate::{corners, fonts, look, shot};
+use crate::{corners, fonts, look, shot, skin};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::wayland::{Event as WaylandEvent, OutputEvent};
@@ -670,10 +670,11 @@ impl Overlay {
     // ----------------------------------------------------------------------------- drawing
 
     fn aura(&self) -> AuraCanvas {
-        let theme = cosmic::theme::active();
+        let skin_st = skin::skin_style(&self.settings.skin);
+        let theme = skin::active_theme(&self.settings.skin, &self.settings.corners).unwrap_or_else(cosmic::theme::active);
         let c = theme.cosmic();
-        let dark = c.is_dark;
-        let accent = rgb(c.accent_color().into());
+        let dark = skin_st.is_some() || c.is_dark;
+        let accent = skin_st.map_or_else(|| rgb(c.accent_color().into()), |st| rgb(st.accent));
         let t = self.now();
         let phase_t = match self.speaking_since {
             Some(since) if self.machine.speaking => since.elapsed().as_secs_f32(),
@@ -697,7 +698,10 @@ impl Overlay {
         };
         let sizes = corners::sizes(&self.settings.corners);
         let radius = if corners::normalize(&self.settings.corners) == "square" { 0.0 } else { sizes.radius.clamp(12.0, 26.0) };
-        let mut surface: Color = c.bg_color().into();
+        let mut surface: Color = skin_st.map_or_else(
+            || c.bg_color().into(),
+            |st| Color::from_rgb8(st.window_bg[0], st.window_bg[1], st.window_bg[2]),
+        );
         // Opaque: text behind the pill must not show through the answer (Hyprland showed it at 92 %).
         surface.a = 1.0;
         let countdown = match self.closing {
@@ -712,6 +716,7 @@ impl Overlay {
             colors: aura::aura_colors(accent, dark, tone),
             accent: aura::aura_colors(accent, dark, Tone::Accent),
             surface,
+            skin_border: skin_st.map(|st| (st.border_tint, st.border_width)),
             mode,
             level: self.envelope.value,
             t,
@@ -759,7 +764,7 @@ impl Overlay {
         row![
             space::horizontal().width(Length::Fixed(LEAD - 8.0)),
             field,
-            container(text::caption(hint).class(theme::Text::Custom(dim_text))).padding([2, 6]).class(theme::Container::custom(key_badge)),
+            container(text::caption(hint).class(theme::Text::Custom(dim_text))).padding([2, 6]).class(key_badge(&self.settings.skin)),
         ]
         .spacing(8)
         .padding([0, 12, 0, 0])
@@ -794,14 +799,14 @@ impl Overlay {
                     if gap > 0.0 {
                         text_col = text_col.push(space::vertical().height(Length::Fixed(gap)));
                     }
-                    text_col = text_col.push(block_view(block, Type::Reading { lead: answer::is_lead(&blocks, i) }));
+                    text_col = text_col.push(block_view(block, Type::Reading { lead: answer::is_lead(&blocks, i) }, &self.settings.skin));
                 }
                 if !blocks.is_empty() {
                     col = col.push(text_col);
                 }
             } else {
                 for block in &blocks {
-                    col = col.push(block_view(block, Type::Compact));
+                    col = col.push(block_view(block, Type::Compact, &self.settings.skin));
                 }
             }
             for (i, item) in self.turn.items.iter().enumerate() {
@@ -855,7 +860,7 @@ impl Overlay {
             if let Some(i) = undo {
                 r = r.push(cosmic::widget::button::text(tr("Undo")).on_press(Message::Undo(Some(i))));
             }
-            container(r).padding([4, 8]).width(Length::Fill).class(theme::Container::custom(chip_box)).into()
+            container(r).padding([4, 8]).width(Length::Fill).class(chip_box(&self.settings.skin)).into()
         };
         match &item.state {
             ItemState::Waiting => chip("·", what, dim_text, None),
@@ -868,7 +873,7 @@ impl Overlay {
             ItemState::Rejected(_) => chip("⊘", tr("The helper proposed an action this overlay can't read."), dim_text, None),
             ItemState::Cancelled => chip("–", trf("Cancelled: {0}", &[&what]), dim_text, None),
             ItemState::Confirm => self.card_view(item, what),
-            ItemState::Weather(w) => weather_view(w),
+            ItemState::Weather(w) => weather_view(w, &self.settings.skin),
             ItemState::Output { ok, text, output } => {
                 let mut c = cosmic::iced::widget::Column::new().spacing(4).push(row![
                     text::body(if *ok { "▸" } else { "✕" }).class(theme::Text::Custom(if *ok { accent_text } else { error_text })).width(Length::Fixed(16.0)),
@@ -876,7 +881,7 @@ impl Overlay {
                 ]);
                 if !output.is_empty() {
                     let shown: String = output.chars().take(4000).collect();
-                    c = c.push(container(text::body(shown).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
+                    c = c.push(container(text::body(shown).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(code_box(&self.settings.skin)));
                 }
                 c.into()
             }
@@ -895,7 +900,7 @@ impl Overlay {
         let mut c = cosmic::iced::widget::Column::new().spacing(6).push(row![text::body("!").class(theme::Text::Custom(warning_text)).width(Length::Fixed(16.0)), text::heading(what)]);
         match &item.action {
             Some(schema::Action::RunCommand { argv, why }) => {
-                c = c.push(container(text::body(shell_words(argv)).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)));
+                c = c.push(container(text::body(shell_words(argv)).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(code_box(&self.settings.skin)));
                 if !why.is_empty() {
                     c = c.push(text::caption(why.clone()).class(theme::Text::Custom(dim_text)));
                 }
@@ -966,7 +971,7 @@ pub fn shell_words(argv: &[String]) -> String {
 }
 
 /// The weather card: now, today's high and low, the next hours.
-fn weather_view(w: &actions::weather::Weather) -> Element<'static, Message> {
+fn weather_view(w: &actions::weather::Weather, skin_name: &str) -> Element<'static, Message> {
     use actions::weather::{condition, degrees, icon};
     let icon_of = |code: i64, day: bool, size: u16| cosmic::widget::icon::from_name(icon(code, day)).size(size).icon();
     let mut details = vec![];
@@ -1018,7 +1023,7 @@ fn weather_view(w: &actions::weather::Weather) -> Element<'static, Message> {
     if !w.hours.is_empty() {
         c = c.push(cosmic::widget::divider::horizontal::light()).push(hours);
     }
-    container(c).padding(12).width(Length::Fill).class(theme::Container::custom(weather_box)).into()
+    container(c).padding(12).width(Length::Fill).class(weather_box(skin_name)).into()
 }
 
 /// An output's logical size: as xdg-output reports it, else its current mode over its scale.
@@ -1096,7 +1101,7 @@ fn rich(raw: &str, size: f32, line: f32, weight: cosmic::iced::font::Weight) -> 
     rich_text(spans).size(size).line_height(cosmic::iced::widget::text::LineHeight::Relative(line)).width(Length::Fill).into()
 }
 
-fn block_view(block: &Block, kind: Type) -> Element<'static, Message> {
+fn block_view(block: &Block, kind: Type, skin_name: &str) -> Element<'static, Message> {
     use cosmic::iced::font::Weight;
     let (size, line) = kind.body();
     match block {
@@ -1111,7 +1116,7 @@ fn block_view(block: &Block, kind: Type) -> Element<'static, Message> {
             ]
             .into()
         }
-        Block::Code(t) => container(text::body(t.clone()).font(crate::look::mono_font()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(theme::Container::custom(code_box)).into(),
+        Block::Code(t) => container(text::body(t.clone()).font(crate::look::mono_font()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(code_box(skin_name)).into(),
     }
 }
 
@@ -1139,18 +1144,38 @@ fn warning_text(theme: &cosmic::Theme) -> iced_text::Style {
     iced_text::Style { color: Some(theme.cosmic().warning_color().into()), ..Default::default() }
 }
 
-fn chip_box(theme: &cosmic::Theme) -> iced_container::Style {
-    let mut bg = Color::from(theme.cosmic().on_bg_color());
-    bg.a = 0.06;
-    iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().control.into(), ..Default::default() }, ..Default::default() }
+fn chip_box(skin_name: &str) -> theme::Container<'static> {
+    let skin_st = skin::skin_style(skin_name);
+    theme::Container::custom(move |theme: &cosmic::Theme| match skin_st {
+        Some(st) => iced_container::Style {
+            background: Some(Background::Color(skin::with_alpha(st.bg_tint, 0.22))),
+            border: Border { radius: corners::now().control.into(), width: 1.0, color: skin::with_alpha(st.border_tint, 0.40) },
+            ..Default::default()
+        },
+        None => {
+            let mut bg = Color::from(theme.cosmic().on_bg_color());
+            bg.a = 0.06;
+            iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().control.into(), ..Default::default() }, ..Default::default() }
+        }
+    })
 }
 
-fn weather_box(theme: &cosmic::Theme) -> iced_container::Style {
-    let mut bg = Color::from(theme.cosmic().on_bg_color());
-    bg.a = 0.05;
-    let mut border = Color::from(theme.cosmic().on_bg_color());
-    border.a = 0.10;
-    iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().radius.into(), width: 1.0, color: border }, ..Default::default() }
+fn weather_box(skin_name: &str) -> theme::Container<'static> {
+    let skin_st = skin::skin_style(skin_name);
+    theme::Container::custom(move |theme: &cosmic::Theme| match skin_st {
+        Some(st) => iced_container::Style {
+            background: Some(Background::Color(skin::with_alpha(st.bg_tint, 0.28))),
+            border: Border { radius: corners::now().radius.into(), width: st.border_width, color: skin::with_alpha(st.border_tint, 0.48) },
+            ..Default::default()
+        },
+        None => {
+            let mut bg = Color::from(theme.cosmic().on_bg_color());
+            bg.a = 0.05;
+            let mut border = Color::from(theme.cosmic().on_bg_color());
+            border.a = 0.10;
+            iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().radius.into(), width: 1.0, color: border }, ..Default::default() }
+        }
+    })
 }
 
 /// Amber: the palette's warning colour (Maprisma Theme's yellow) as a tint and a border.
@@ -1161,16 +1186,36 @@ fn amber_card(theme: &cosmic::Theme) -> iced_container::Style {
     iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().radius.into(), width: 1.5, color: warning }, ..Default::default() }
 }
 
-fn key_badge(theme: &cosmic::Theme) -> iced_container::Style {
-    let mut border = Color::from(theme.cosmic().on_bg_color());
-    border.a = 0.18;
-    iced_container::Style { border: Border { radius: corners::now().small.into(), width: 1.0, color: border }, ..Default::default() }
+fn key_badge(skin_name: &str) -> theme::Container<'static> {
+    let skin_st = skin::skin_style(skin_name);
+    theme::Container::custom(move |theme: &cosmic::Theme| match skin_st {
+        Some(st) => iced_container::Style {
+            background: Some(Background::Color(skin::with_alpha(st.accent, 0.24))),
+            border: Border { radius: corners::now().small.into(), width: 1.0, color: skin::with_alpha(st.border_tint, 0.48) },
+            ..Default::default()
+        },
+        None => {
+            let mut border = Color::from(theme.cosmic().on_bg_color());
+            border.a = 0.18;
+            iced_container::Style { border: Border { radius: corners::now().small.into(), width: 1.0, color: border }, ..Default::default() }
+        }
+    })
 }
 
-fn code_box(theme: &cosmic::Theme) -> iced_container::Style {
-    let mut bg = Color::from(theme.cosmic().on_bg_color());
-    bg.a = 0.07;
-    iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().control.into(), ..Default::default() }, ..Default::default() }
+fn code_box(skin_name: &str) -> theme::Container<'static> {
+    let skin_st = skin::skin_style(skin_name);
+    theme::Container::custom(move |theme: &cosmic::Theme| match skin_st {
+        Some(st) => iced_container::Style {
+            background: Some(Background::Color(skin::with_alpha(st.bg_tint, 0.22))),
+            border: Border { radius: corners::now().control.into(), width: 1.0, color: skin::with_alpha(st.border_tint, 0.40) },
+            ..Default::default()
+        },
+        None => {
+            let mut bg = Color::from(theme.cosmic().on_bg_color());
+            bg.a = 0.07;
+            iced_container::Style { background: Some(Background::Color(bg)), border: Border { radius: corners::now().control.into(), ..Default::default() }, ..Default::default() }
+        }
+    })
 }
 
 /// The overlay's language code (the setting, or the session's for "system").
@@ -1243,6 +1288,7 @@ struct AuraCanvas {
     colors: AuraColors,
     accent: AuraColors,
     surface: Color,
+    skin_border: Option<(Color, f32)>,
     mode: Mode,
     level: f32,
     t: f32,
@@ -1324,8 +1370,12 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
             frame.stroke(&rounded(inner, (r - inset).max(2.0)), Stroke { style: self.gradient(pill, &colors, 0.0, 0.55 * (1.0 - p)), width: 1.5, ..Default::default() });
         }
         // The ring.
-        let half = width / 2.0;
-        frame.stroke(&rounded(grow(pill, -half), (r - half).max(0.0)), Stroke { style: self.gradient(pill, &colors, angle, alpha), width, ..Default::default() });
+        let (ring_width, ring_style) = match (self.mode, self.skin_border) {
+            (Mode::Idle, Some((border_tint, bw))) => (bw, canvas::Style::Solid(skin::with_alpha(border_tint, 0.55 + 0.20 * (alpha - 0.20) / 0.10))),
+            _ => (width, self.gradient(pill, &colors, angle, alpha)),
+        };
+        let half = ring_width / 2.0;
+        frame.stroke(&rounded(grow(pill, -half), (r - half).max(0.0)), Stroke { style: ring_style, width: ring_width, ..Default::default() });
         // An auto-close counting down: a thin line along the bottom, shrinking to the left.
         if let Some(left) = self.countdown {
             let inset = r.max(12.0);
@@ -1433,7 +1483,7 @@ impl cosmic::Application for Overlay {
             close_kept: false,
         };
         fonts::load(look::desktop());
-        let theme = corners::set_app_theme(&app.settings.corners);
+        let theme = skin::set_app_theme(&app.settings.skin, &app.settings.corners);
         let open = if app.output_wanted.is_some() {
             // Wait for that output to be announced (a second at most, then the active one).
             Task::perform(tokio::time::sleep(Duration::from_millis(1000)), |_| cosmic::Action::App(Message::OpenFallback))
@@ -1441,6 +1491,11 @@ impl cosmic::Application for Overlay {
             app.open(IcedOutput::Active)
         };
         (app, Task::batch([theme, open]))
+    }
+
+    fn system_theme_update(&mut self, _keys: &[&'static str], new_theme: &cosmic::cosmic_theme::Theme) -> Task<Message> {
+        let _ = corners::system_theme_update::<Message>(&self.settings.corners, new_theme, false);
+        skin::set_app_theme(&self.settings.skin, &self.settings.corners)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -1745,7 +1800,7 @@ impl cosmic::Application for Overlay {
             }
             Message::LookTick => {
                 let fresh = settings::read();
-                let mut restyle = fresh.corners != self.settings.corners;
+                let mut restyle = fresh.corners != self.settings.corners || fresh.skin != self.settings.skin;
                 if fresh.language != self.settings.language {
                     maprisma_voice::i18n::set_language(&fresh.language);
                 }
@@ -1753,7 +1808,7 @@ impl cosmic::Application for Overlay {
                 self.settings = fresh;
                 restyle |= look::refresh();
                 if restyle {
-                    return corners::set_app_theme(&self.settings.corners);
+                    return skin::set_app_theme(&self.settings.skin, &self.settings.corners);
                 }
             }
             Message::ShotKey(id) => {
@@ -1801,11 +1856,16 @@ impl cosmic::Application for Overlay {
         if Some(id) == self.catcher {
             return mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill)).on_press(Message::ClickOutside).into();
         }
-        self.pill()
+        match skin::active_theme(&self.settings.skin, &self.settings.corners) {
+            Some(theme) => cosmic::iced::widget::themer(Some(theme), self.pill())
+                .text_color(|t: &cosmic::Theme| t.cosmic().on_bg_color().into())
+                .into(),
+            None => self.pill(),
+        }
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
-        let theme = cosmic::theme::active();
+        let theme = skin::active_theme(&self.settings.skin, &self.settings.corners).unwrap_or_else(cosmic::theme::active);
         Some(cosmic::iced::theme::Style { background_color: Color::TRANSPARENT, text_color: theme.cosmic().on_bg_color().into(), icon_color: theme.cosmic().on_bg_color().into() })
     }
 }

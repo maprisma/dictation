@@ -5,7 +5,7 @@
 //! Corners). The icon follows the overlay and the voice service (src/bar.rs).
 
 use maprisma_dictation::bar::{self, Command, Shown};
-use maprisma_dictation::{corners, look, settings};
+use maprisma_dictation::{corners, look, settings, skin};
 use maprisma_voice::i18n::{LANGUAGES, tr, trf};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -34,13 +34,15 @@ struct Applet {
     core: Core,
     shown: Shown,
     corners: String,
+    skin: String,
     language: String,
     screenshot_key: bool,
     popup: Option<window::Id>,
-    /// The settings page (Language, F12, Corners) is shown instead of the menu.
+    /// The settings page (Language, F12, Corners, App skin) is shown instead of the menu.
     settings_open: bool,
     language_open: bool,
     corners_open: bool,
+    skin_open: bool,
     setting_error: bool,
     rectangle: Rectangle,
     tracker: Option<RectangleTracker<u32>>,
@@ -58,8 +60,10 @@ enum Message {
     ToggleSettings,
     ToggleLanguage,
     ToggleCorners,
+    ToggleSkin,
     Language(String),
     Corners(String),
+    SetSkin(String),
     SetShotKey(bool),
     Shown(Shown),
     Tick,
@@ -127,26 +131,37 @@ fn spawn(command: Command) {
 }
 
 impl Applet {
-    /// The overlay's settings: language and corners (Maprisma Settings' Voice page writes them).
+    /// The overlay's settings: language, corners and skin (Maprisma Settings' Voice page writes them).
     fn reload(&mut self) {
         let s = settings::read();
         maprisma_voice::i18n::set_language(&s.language);
         corners::set_current(&s.corners);
         self.corners = s.corners;
+        self.skin = s.skin;
         self.language = s.language;
         self.screenshot_key = s.screenshot_key;
     }
 
     /// Saves one setting to the overlay's settings file, then reads them all again.
     fn save(&mut self, key: &str, value: serde_json::Value) {
-        self.setting_error = settings::set(key, value).is_err();
+        self.save_opt(key, Some(value));
+    }
+
+    /// Saves (`Some`) or removes (`None`) one setting in the overlay's settings file, then reads them all again.
+    fn save_opt(&mut self, key: &str, value: Option<serde_json::Value>) {
+        self.setting_error = settings::set_opt(key, value).is_err();
         self.reload();
+    }
+
+    fn close_settings_menus(&mut self) {
+        self.language_open = false;
+        self.corners_open = false;
+        self.skin_open = false;
     }
 
     fn close_popup(&mut self) -> Task<Message> {
         self.settings_open = false;
-        self.language_open = false;
-        self.corners_open = false;
+        self.close_settings_menus();
         match self.popup.take() {
             Some(id) => destroy_popup(id),
             None => Task::none(),
@@ -197,6 +212,35 @@ impl Applet {
             for (choice, label) in corner_choices {
                 let label = if self.corners == choice { format!("✓ {label}") } else { label };
                 page = page.push(menu_button(text::body(label)).on_press(Message::Corners(choice.into())));
+            }
+        }
+        page = page.push(padded_control(
+            row![
+                column![
+                    text::body(tr("App skin")),
+                    text::caption(tr("Visual accent for cards and borders; Native keeps your desktop theme untouched."))
+                        .class(theme::Text::Custom(dim_text)),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                choice(skin::skin_label(&self.skin), self.skin_open, Message::ToggleSkin),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        ));
+        if self.skin_open {
+            for sk in skin::SKINS {
+                let name = skin::skin_label(sk);
+                let label = if self.skin == sk { format!("✓ {name}") } else { name };
+                let row_inner: Element<Message> = if let Some(st) = skin::skin_style(sk) {
+                    row![skin::swatch_dot(st.accent, 10.0), text::body(label)]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .into()
+                } else {
+                    text::body(label).into()
+                };
+                page = page.push(menu_button(row_inner).on_press(Message::SetSkin(sk.into())));
             }
         }
         if self.setting_error {
@@ -257,6 +301,11 @@ impl cosmic::Application for Applet {
         (app, Task::none())
     }
 
+    fn system_theme_update(&mut self, _keys: &[&'static str], new_theme: &cosmic::cosmic_theme::Theme) -> Task<Message> {
+        let _ = corners::system_theme_update::<Message>(&self.corners, new_theme, false);
+        Task::none()
+    }
+
     fn on_close_requested(&self, id: window::Id) -> Option<Message> {
         Some(Message::Closed(id))
     }
@@ -297,27 +346,30 @@ impl cosmic::Application for Applet {
                 self.reload();
                 look::refresh();
             }
-            Message::Escape(id) => match esc_step(self.language_open || self.corners_open, self.settings_open, self.popup == Some(id)) {
-                EscStep::Menus => {
-                    self.language_open = false;
-                    self.corners_open = false;
-                }
+            Message::Escape(id) => match esc_step(self.language_open || self.corners_open || self.skin_open, self.settings_open, self.popup == Some(id)) {
+                EscStep::Menus => self.close_settings_menus(),
                 EscStep::Back => self.settings_open = false,
                 EscStep::Close => return self.close_popup(),
                 EscStep::Nothing => {}
             },
             Message::ToggleSettings => {
                 self.settings_open = !self.settings_open;
-                self.language_open = false;
-                self.corners_open = false;
+                self.close_settings_menus();
             }
             Message::ToggleLanguage => {
-                self.language_open = !self.language_open;
-                self.corners_open = false;
+                let next = !self.language_open;
+                self.close_settings_menus();
+                self.language_open = next;
             }
             Message::ToggleCorners => {
-                self.corners_open = !self.corners_open;
-                self.language_open = false;
+                let next = !self.corners_open;
+                self.close_settings_menus();
+                self.corners_open = next;
+            }
+            Message::ToggleSkin => {
+                let next = !self.skin_open;
+                self.close_settings_menus();
+                self.skin_open = next;
             }
             Message::Language(code) => {
                 self.language_open = false;
@@ -327,13 +379,18 @@ impl cosmic::Application for Applet {
                 self.corners_open = false;
                 self.save("corners", choice.into());
             }
+            Message::SetSkin(choice) => {
+                let choice = skin::normalize_skin(&choice);
+                let value = (choice != "native").then(|| serde_json::Value::from(choice));
+                self.skin_open = false;
+                self.save_opt(skin::SKIN_KEY, value);
+            }
             Message::SetShotKey(on) => self.save("screenshot_key", on.into()),
             Message::Closed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
                     self.settings_open = false;
-                    self.language_open = false;
-                    self.corners_open = false;
+                    self.close_settings_menus();
                 }
             }
             Message::Rectangle(update) => match update {
@@ -371,9 +428,10 @@ impl cosmic::Application for Applet {
         let size = self.core.applet.suggested_size(true).0;
         let mut bar_icon = icon::from_name(self.shown.icon()).size(size).symbolic(true).icon();
         if self.shown.active() {
-            // Green while the microphone listens, as every Maprisma bar icon that is on.
-            bar_icon = bar_icon.class(theme::Svg::custom(|theme: &cosmic::Theme| iced_svg::Style {
-                color: Some(theme.cosmic().accent_color().into()),
+            // Accent while the microphone listens, as every Maprisma bar icon that is on.
+            let custom = skin::skin_style(&self.skin).map(|st| st.accent);
+            bar_icon = bar_icon.class(theme::Svg::custom(move |theme: &cosmic::Theme| iced_svg::Style {
+                color: Some(custom.unwrap_or_else(|| theme.cosmic().accent_color().into())),
             }));
         }
         let button = button::custom(bar_icon)
@@ -390,7 +448,7 @@ impl cosmic::Application for Applet {
 
     fn view_window(&self, _id: window::Id) -> Element<'_, Message> {
         look::keep_fonts();
-        corners::apply(&self.corners, self.core.applet.popup_container(self.popup_content()))
+        skin::apply_popup(&self.skin, &self.corners, &self.core, self.popup_content())
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
