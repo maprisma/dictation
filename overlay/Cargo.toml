@@ -1,6 +1,6 @@
 [package]
 name = "maprisma-dictation"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 description = "Maprisma Dictation: a top-centre voice and typing overlay that asks the shared AI helper (COSMIC, KDE Plasma, Hyprland)"
