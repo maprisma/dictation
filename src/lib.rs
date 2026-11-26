@@ -7,6 +7,7 @@ pub mod client;
 pub mod core;
 pub mod dbus;
 pub mod engines;
+pub mod filter;
 pub mod http;
 pub mod i18n;
 pub mod models;

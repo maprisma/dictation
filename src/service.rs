@@ -54,10 +54,10 @@ impl RealBackend {
 }
 
 /// The engine object for a choice.
-pub fn make_engine(dirs: &Dirs, server: &Arc<engines::whisper::WhisperServer>, choice: Choice) -> Arc<dyn Engine> {
+pub fn make_engine(dirs: &Dirs, server: &Arc<engines::whisper::WhisperServer>, choice: Choice, hallucination_filter: bool) -> Arc<dyn Engine> {
     match choice {
-        Choice::Whisper { server: binary, model } => Arc::new(engines::whisper::WhisperEngine { server: server.clone(), binary, model: model.path }),
-        Choice::Online(provider) => Arc::new(engines::online::OnlineEngine { dirs: dirs.clone(), provider }),
+        Choice::Whisper { server: binary, model } => Arc::new(engines::whisper::WhisperEngine { server: server.clone(), binary, model: model.path, hallucination_filter }),
+        Choice::Online(provider) => Arc::new(engines::online::OnlineEngine { dirs: dirs.clone(), provider, hallucination_filter }),
         Choice::External(kind, program) => Arc::new(engines::external::ExternalEngine { kind, program }),
     }
 }
@@ -70,7 +70,14 @@ impl Backend for RealBackend {
         }
         let choice = engines::choose(&s.engine, &facts).map_err(|why| VoiceError::not_ready(crate::i18n::why_not(why)))?;
         let language = request.language.clone().unwrap_or(s.language.clone());
-        Ok(Prepared { engine: make_engine(&self.dirs, &self.server, choice), language, microphone: s.microphone })
+        Ok(Prepared {
+            engine: make_engine(&self.dirs, &self.server, choice, s.hallucination_filter),
+            language,
+            microphone: s.microphone,
+            noise_filter: crate::filter::NoiseFilterMode::parse(&s.noise_filter),
+            vad: Some(crate::vad::VadConfig::for_sensitivity(&s.vad_sensitivity)),
+            hallucination_filter: s.hallucination_filter,
+        })
     }
 
     fn capture(&self, microphone: &str) -> Result<Capture, VoiceError> {
@@ -109,6 +116,10 @@ pub fn status_map(s: &Settings, facts: &Facts) -> Map<String, Value> {
     m.insert("whisper_server".into(), facts.whisper_server.as_ref().map(|p| p.display().to_string()).unwrap_or_default().into());
     m.insert("models".into(), facts.models.iter().map(|m| m.name.clone()).collect::<Vec<_>>().into());
     m.insert("online_provider".into(), facts.online.as_ref().map(|p| p.name).unwrap_or("").into());
+    m.insert("noise_filter".into(), s.noise_filter.clone().into());
+    m.insert("vad_sensitivity".into(), s.vad_sensitivity.clone().into());
+    m.insert("hallucination_filter".into(), s.hallucination_filter.into());
+    m.insert("hallucination_filter_active".into(), (s.hallucination_filter && matches!(choice, Ok(Choice::Whisper { .. } | Choice::Online(..)))).into());
     m
 }
 
@@ -128,7 +139,7 @@ pub fn transcribe_file(dirs: &Dirs, pcm: &[i16], engine: Option<&str>, model: Op
         return Err(VoiceError::not_supported(crate::i18n::tr("This engine types the text itself and cannot transcribe a file.")));
     }
     let server: Arc<engines::whisper::WhisperServer> = Arc::default();
-    let engine = make_engine(dirs, &server, choice);
+    let engine = make_engine(dirs, &server, choice, s.hallucination_filter);
     let result = engine.transcribe(pcm, language.unwrap_or(&s.language));
     server.stop();
     Ok((result?, engine.id().into(), engine.model()))
@@ -169,11 +180,21 @@ mod tests {
         let mut req = SessionRequest { app_id: "x".into(), mode: crate::core::Mode::Dictate, end: crate::core::End::Release, language: None };
         let p = backend.prepare(&req).unwrap();
         assert_eq!((p.engine.id(), p.language.as_str()), ("online", "de"));
+        assert_eq!(p.noise_filter, crate::filter::NoiseFilterMode::Standard);
+        assert!(p.hallucination_filter);
+        let st = backend.status();
+        assert_eq!(st["noise_filter"], "standard");
+        assert_eq!(st["vad_sensitivity"], "normal");
+        assert_eq!(st["hallucination_filter"], true);
+        assert_eq!(st["hallucination_filter_active"], true);
         req.language = Some("en".into());
         assert_eq!(backend.prepare(&req).unwrap().language, "en");
         // Changed settings take effect at the next session.
         settings::set(&dirs, "engine", Some("voxtype".into())).unwrap();
         assert_eq!(backend.prepare(&req).unwrap().engine.id(), "voxtype");
-        assert_eq!(backend.status()["typed_by_engine"], true);
+        let st = backend.status();
+        assert_eq!(st["typed_by_engine"], true);
+        assert_eq!(st["hallucination_filter"], true);
+        assert_eq!(st["hallucination_filter_active"], false);
     }
 }

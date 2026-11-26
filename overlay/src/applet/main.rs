@@ -38,12 +38,20 @@ struct Applet {
     skin: String,
     language: String,
     screenshot_key: bool,
+    // Shared maprisma-voice settings (~/.config/maprisma-voice/settings.json).
+    voice_language: String,
+    noise_filter: String,
+    vad_sensitivity: String,
+    hallucination_filter: bool,
     popup: Option<window::Id>,
-    /// The settings page (Language, F12, Corners, App skin) is shown instead of the menu.
+    /// The settings page is shown instead of the menu.
     settings_open: bool,
     language_open: bool,
     corners_open: bool,
     skin_open: bool,
+    voice_language_open: bool,
+    noise_filter_open: bool,
+    vad_sensitivity_open: bool,
     setting_error: bool,
     rectangle: Rectangle,
     tracker: Option<RectangleTracker<u32>>,
@@ -62,10 +70,17 @@ enum Message {
     ToggleLanguage,
     ToggleCorners,
     ToggleSkin,
+    ToggleVoiceLanguage,
+    ToggleNoiseFilter,
+    ToggleVadSensitivity,
     Language(String),
     Corners(String),
     SetSkin(String),
     SetShotKey(bool),
+    SetVoiceLanguage(String),
+    SetNoiseFilter(String),
+    SetVadSensitivity(String),
+    SetHallucinationFilter(bool),
     Shown(Shown),
     Tick,
     Escape(window::Id),
@@ -132,7 +147,7 @@ fn spawn(command: Command) {
 }
 
 impl Applet {
-    /// The overlay's settings: language, corners and skin (Maprisma Settings' Voice page writes them).
+    /// The overlay's settings and shared maprisma-voice settings (Maprisma Settings' Voice page writes them).
     fn reload(&mut self) {
         let s = settings::read();
         maprisma_voice::i18n::set_language(&s.language);
@@ -141,6 +156,11 @@ impl Applet {
         self.skin = s.skin;
         self.language = s.language;
         self.screenshot_key = s.screenshot_key;
+        let voice = maprisma_voice::settings::load(&maprisma_voice::paths::Dirs::from_env());
+        self.voice_language = voice.language;
+        self.noise_filter = voice.noise_filter;
+        self.vad_sensitivity = voice.vad_sensitivity;
+        self.hallucination_filter = voice.hallucination_filter;
     }
 
     /// Saves one setting to the overlay's settings file, then reads them all again.
@@ -154,10 +174,29 @@ impl Applet {
         self.reload();
     }
 
+    /// Saves one shared setting to `~/.config/maprisma-voice/settings.json`, then reloads.
+    fn save_voice(&mut self, key: &str, value: serde_json::Value) {
+        let dirs = maprisma_voice::paths::Dirs::from_env();
+        self.setting_error = maprisma_voice::settings::set(&dirs, key, Some(value)).is_err();
+        self.reload();
+    }
+
     fn close_settings_menus(&mut self) {
         self.language_open = false;
         self.corners_open = false;
         self.skin_open = false;
+        self.voice_language_open = false;
+        self.noise_filter_open = false;
+        self.vad_sensitivity_open = false;
+    }
+
+    fn any_menu_open(&self) -> bool {
+        self.language_open
+            || self.corners_open
+            || self.skin_open
+            || self.voice_language_open
+            || self.noise_filter_open
+            || self.vad_sensitivity_open
     }
 
     fn close_popup(&mut self) -> Task<Message> {
@@ -244,6 +283,59 @@ impl Applet {
                 page = page.push(menu_button(row_inner).on_press(Message::SetSkin(sk.into())));
             }
         }
+        // Shared voice service settings (same settings.json as Maprisma Settings → Voice).
+        page = page.push(padded_control(divider::horizontal::default()));
+        page = page.push(padded_control(text::caption(tr("Audio & recognition").to_uppercase()).class(theme::Text::Custom(dim_text))));
+        let voice_languages: Vec<(String, String)> = [
+            ("auto", tr("Automatic")),
+            ("de", "Deutsch".into()),
+            ("en", "English".into()),
+            ("fr", "Français".into()),
+            ("es", "Español".into()),
+            ("it", "Italiano".into()),
+            ("pt", "Português".into()),
+            ("nl", "Nederlands".into()),
+            ("pl", "Polski".into()),
+        ]
+        .into_iter()
+        .map(|(c, l)| (c.to_string(), l))
+        .collect();
+        let current_voice_lang = voice_languages
+            .iter()
+            .find(|(c, _)| *c == self.voice_language)
+            .map(|(_, l)| l.clone())
+            .unwrap_or_else(|| self.voice_language.clone());
+        page = page.push(setting(tr("Dictation language"), choice(current_voice_lang, self.voice_language_open, Message::ToggleVoiceLanguage)));
+        if self.voice_language_open {
+            for (code, label) in voice_languages {
+                let label = if code == self.voice_language { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::SetVoiceLanguage(code)));
+            }
+        }
+        let noise_choices = [("off", tr("Off")), ("standard", tr("Standard")), ("strong", tr("Strong"))];
+        let current_noise = noise_choices.iter().find(|(c, _)| *c == self.noise_filter).map(|(_, l)| l.clone()).unwrap_or_else(|| tr("Standard"));
+        page = page.push(setting(tr("Noise filter"), choice(current_noise, self.noise_filter_open, Message::ToggleNoiseFilter)));
+        if self.noise_filter_open {
+            for (code, label) in noise_choices {
+                let label = if code == self.noise_filter { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::SetNoiseFilter(code.into())));
+            }
+        }
+        let vad_choices = [("strict", tr("Strict")), ("normal", tr("Normal")), ("sensitive", tr("Sensitive"))];
+        let current_vad = vad_choices.iter().find(|(c, _)| *c == self.vad_sensitivity).map(|(_, l)| l.clone()).unwrap_or_else(|| tr("Normal"));
+        page = page.push(setting(tr("Voice sensitivity"), choice(current_vad, self.vad_sensitivity_open, Message::ToggleVadSensitivity)));
+        if self.vad_sensitivity_open {
+            for (code, label) in vad_choices {
+                let label = if code == self.vad_sensitivity { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::SetVadSensitivity(code.into())));
+            }
+        }
+        page = page.push(setting(
+            tr("Reject hallucinations"),
+            cosmic::widget::toggler(self.hallucination_filter).on_toggle(Message::SetHallucinationFilter).into(),
+        ));
+        page = page.push(padded_control(divider::horizontal::default()));
+        page = page.push(menu_button(text::body(tr("All Voice settings…"))).on_press(Message::Settings));
         if self.setting_error {
             page = page.push(padded_control(text::body(tr("Could not save the setting."))));
         }
@@ -344,10 +436,12 @@ impl cosmic::Application for Applet {
             }
             Message::Shown(shown) => self.shown = shown,
             Message::Tick => {
-                self.reload();
+                if !self.any_menu_open() {
+                    self.reload();
+                }
                 look::refresh();
             }
-            Message::Escape(id) => match esc_step(self.language_open || self.corners_open || self.skin_open, self.settings_open, self.popup == Some(id)) {
+            Message::Escape(id) => match esc_step(self.any_menu_open(), self.settings_open, self.popup == Some(id)) {
                 EscStep::Menus => self.close_settings_menus(),
                 EscStep::Back => self.settings_open = false,
                 EscStep::Close => return self.close_popup(),
@@ -356,6 +450,9 @@ impl cosmic::Application for Applet {
             Message::ToggleSettings => {
                 self.settings_open = !self.settings_open;
                 self.close_settings_menus();
+                if self.settings_open {
+                    self.reload();
+                }
             }
             Message::ToggleLanguage => {
                 let next = !self.language_open;
@@ -372,6 +469,21 @@ impl cosmic::Application for Applet {
                 self.close_settings_menus();
                 self.skin_open = next;
             }
+            Message::ToggleVoiceLanguage => {
+                let next = !self.voice_language_open;
+                self.close_settings_menus();
+                self.voice_language_open = next;
+            }
+            Message::ToggleNoiseFilter => {
+                let next = !self.noise_filter_open;
+                self.close_settings_menus();
+                self.noise_filter_open = next;
+            }
+            Message::ToggleVadSensitivity => {
+                let next = !self.vad_sensitivity_open;
+                self.close_settings_menus();
+                self.vad_sensitivity_open = next;
+            }
             Message::Language(code) => {
                 self.language_open = false;
                 self.save("language", code.into());
@@ -387,6 +499,19 @@ impl cosmic::Application for Applet {
                 self.save_opt(skin::SKIN_KEY, value);
             }
             Message::SetShotKey(on) => self.save("screenshot_key", on.into()),
+            Message::SetVoiceLanguage(code) => {
+                self.voice_language_open = false;
+                self.save_voice("language", code.into());
+            }
+            Message::SetNoiseFilter(mode) => {
+                self.noise_filter_open = false;
+                self.save_voice("noise_filter", mode.into());
+            }
+            Message::SetVadSensitivity(level) => {
+                self.vad_sensitivity_open = false;
+                self.save_voice("vad_sensitivity", level.into());
+            }
+            Message::SetHallucinationFilter(on) => self.save_voice("hallucination_filter", on.into()),
             Message::Closed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

@@ -111,6 +111,9 @@ pub struct Prepared {
     pub engine: Arc<dyn Engine>,
     pub language: String,
     pub microphone: String,
+    pub noise_filter: crate::filter::NoiseFilterMode,
+    pub vad: Option<VadConfig>,
+    pub hallucination_filter: bool,
 }
 
 pub trait Backend: Send + Sync + 'static {
@@ -421,8 +424,13 @@ impl Core {
     async fn run_recorded(self: Arc<Self>, id: String, prepared: Prepared, end: End, mut capture: Capture, mut control: mpsc::UnboundedReceiver<Control>) {
         let started = Instant::now();
         let engine = prepared.engine.clone();
-        let mut vad = Vad::new(self.vad, end == End::Silence);
+        let vad_cfg = prepared.vad.unwrap_or(self.vad);
+        let mut vad = Vad::new(vad_cfg, end == End::Silence);
+        let mut filter = crate::filter::AudioFilter::new(prepared.noise_filter);
         let mut pcm: Vec<i16> = Vec::new();
+        let mut got_chunk = false;
+        let mut peak_level = 0.0f64;
+        let mut speech_start_sample: Option<usize> = None;
         let (partial_tx, mut partial_rx) = mpsc::unbounded_channel::<String>();
         let mut partial_running = false;
         let mut last_partial_ms = 0u64;
@@ -431,7 +439,7 @@ impl Core {
         let mut cancel: Option<&'static str> = None;
         let mut recorder_ended = false;
         // Wall-clock limits: the VAD only counts audio that came in, a stalled recorder sends none.
-        let hard_end = tokio::time::Instant::now() + Duration::from_millis(u64::from(self.vad.max_ms)) + self.limits.wall_slack;
+        let hard_end = tokio::time::Instant::now() + Duration::from_millis(u64::from(vad_cfg.max_ms)) + self.limits.wall_slack;
         let stall = tokio::time::sleep(self.limits.stall);
         tokio::pin!(stall);
         let reason: &'static str = loop {
@@ -445,22 +453,45 @@ impl Core {
                 },
                 chunk = capture.chunks.recv() => {
                     let Some(chunk) = chunk else { recorder_ended = true; break "recorder_ended" };
+                    got_chunk = true;
                     stall.as_mut().reset(tokio::time::Instant::now() + self.limits.stall);
-                    let level = audio::rms(&chunk);
+                    let Some(processed) = filter.process_chunk_with_level(&chunk) else { continue };
+                    let chunk = processed.samples;
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    // Post-HPF, pre-gate RMS so soft noise-gate attenuation never hides quiet speech from VAD.
+                    let level = processed.vad_rms;
+                    peak_level = peak_level.max(level);
                     let ms = audio::ms_of(chunk.len()) as u32;
+                    let chunk_start = pcm.len();
                     pcm.extend_from_slice(&chunk);
                     self.emit(Event::Level { id: id.clone(), rms: level });
-                    match vad.feed(level, ms.max(1).min(CHUNK_MS * 4)) {
+                    let was_heard = vad.heard_speech();
+                    let decision = vad.feed(level, ms.max(1).min(CHUNK_MS * 4));
+                    if !was_heard {
+                        if vad.speech_run_ms() == 0 {
+                            speech_start_sample = None;
+                        } else if speech_start_sample.is_none() {
+                            speech_start_sample = Some(chunk_start);
+                        }
+                    }
+                    match decision {
                         Decision::Continue => {}
                         Decision::Finish => break "silence",
                         Decision::MaxLength => break "max_length",
                         Decision::NoSpeech => { cancel = Some("no_speech"); break "no_speech" }
                     }
-                    let audio_ms = audio::ms_of(pcm.len());
+                    let trim = if end == End::Silence && vad.heard_speech() {
+                        speech_start_sample.map(|s| s.saturating_sub((audio::RATE as usize * 300) / 1000)).unwrap_or(0).min(pcm.len())
+                    } else {
+                        0
+                    };
+                    let audio_ms = audio::ms_of(pcm.len() - trim);
                     if engine.partials() && !partial_running && vad.heard_speech() && audio_ms >= last_partial_ms + PARTIAL_EVERY_MS {
                         partial_running = true;
                         last_partial_ms = audio_ms;
-                        let (e, snapshot, lang, tx) = (engine.clone(), pcm.clone(), prepared.language.clone(), partial_tx.clone());
+                        let (e, snapshot, lang, tx) = (engine.clone(), pcm[trim..].to_vec(), prepared.language.clone(), partial_tx.clone());
                         tokio::task::spawn_blocking(move || {
                             let _ = tx.send(e.transcribe(&snapshot, &lang).unwrap_or_default());
                         });
@@ -486,13 +517,32 @@ impl Core {
             self.close(&id, r);
             return;
         }
+        let tail = filter.flush();
+        if !tail.is_empty() {
+            pcm.extend_from_slice(&tail);
+        }
+        if end == End::Silence && vad.heard_speech() {
+            if let Some(start) = speech_start_sample {
+                let preroll_samples = (audio::RATE as usize * 300) / 1000;
+                let trim = start.saturating_sub(preroll_samples);
+                if trim > 0 && trim <= pcm.len() {
+                    pcm.drain(..trim);
+                }
+            }
+        }
         let audio_ms = audio::ms_of(pcm.len());
-        if recorder_ended && pcm.is_empty() {
+        if recorder_ended && !got_chunk {
             self.fail(&id, VoiceError::recorder("the recorder stopped before it delivered audio"));
             return;
         }
         self.set_state(&id, "transcribing");
-        let result = if audio_ms < MIN_AUDIO_MS {
+        // In Release mode, skip Whisper only on genuinely silent/noise-only audio (never drop brief
+        // 1-syllable words like "Ja"/"OK" whose peak level crossed near the speech threshold).
+        let skip_silent_release = end == End::Release
+            && prepared.hallucination_filter
+            && !vad.heard_speech()
+            && peak_level < vad_cfg.min_threshold * 0.85;
+        let result = if audio_ms < MIN_AUDIO_MS || skip_silent_release {
             Ok(String::new())
         } else {
             let (e, lang) = (engine.clone(), prepared.language.clone());
@@ -643,7 +693,14 @@ pub mod tests {
 
     impl Backend for FakeBackend {
         fn prepare(&self, request: &SessionRequest) -> Result<Prepared, VoiceError> {
-            Ok(Prepared { engine: self.engine.clone(), language: request.language.clone().unwrap_or("auto".into()), microphone: "default".into() })
+            Ok(Prepared {
+                engine: self.engine.clone(),
+                language: request.language.clone().unwrap_or("auto".into()),
+                microphone: "default".into(),
+                noise_filter: crate::filter::NoiseFilterMode::Off,
+                vad: None,
+                hallucination_filter: false,
+            })
         }
         fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
             self.captures.fetch_add(1, Ordering::SeqCst);
@@ -1014,5 +1071,90 @@ pub mod tests {
         core.start_session(request("a", End::Release)).await.unwrap();
         core.start_session(request("b", End::Release)).await.unwrap();
         assert_eq!(*engine.log.lock().unwrap(), ["start", "stop false", "start"]);
+    }
+
+    struct FilteredBackend {
+        engine: Arc<FakeEngine>,
+        audio: Mutex<Vec<(Vec<i16>, bool)>>,
+        noise_filter: crate::filter::NoiseFilterMode,
+        hallucination_filter: bool,
+    }
+
+    impl Backend for FilteredBackend {
+        fn prepare(&self, request: &SessionRequest) -> Result<Prepared, VoiceError> {
+            Ok(Prepared {
+                engine: self.engine.clone(),
+                language: request.language.clone().unwrap_or("auto".into()),
+                microphone: "default".into(),
+                noise_filter: self.noise_filter,
+                vad: Some(VadConfig::for_sensitivity("normal")),
+                hallucination_filter: self.hallucination_filter,
+            })
+        }
+        fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
+            let mut audio = self.audio.lock().unwrap();
+            let (samples, more) = if audio.is_empty() { (vec![], true) } else { audio.remove(0) };
+            Ok(Capture::from_samples(samples, more))
+        }
+        fn status(&self) -> serde_json::Map<String, serde_json::Value> {
+            serde_json::Map::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn silence_mode_trims_excess_leading_silence_to_preroll() {
+        // 2000 ms silence + 1000 ms speech + 1500 ms silence -> should trim leading silence to 300 ms preroll.
+        let pcm = [synth::silence(2000), synth::tone(1000, 220.0, 6000.0), synth::silence(1500)].concat();
+        let (core, mut rx, _) = setup(FakeEngine::new("trimmed"), vec![(pcm, true)]);
+        let id = core.start_session(request("app", End::Silence)).await.unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        let fin = seen.iter().find_map(|e| match e { Event::Final { text, details, .. } => Some((text.clone(), details.clone())), _ => None }).unwrap();
+        // 300 ms preroll + 1000 ms speech + 900 ms trailing silence = 2200 ms.
+        assert_eq!(fin.1.audio_ms, 2200);
+        assert_eq!(fin.0, "trimmed 2200ms");
+    }
+
+    #[tokio::test]
+    async fn release_mode_skips_whisper_on_pure_silence_when_hallucination_filter_enabled() {
+        let engine = Arc::new(FakeEngine::new("phantom"));
+        let backend = Arc::new(FilteredBackend {
+            engine: engine.clone(),
+            audio: Mutex::new(vec![(synth::noise(1500, 60), false)]),
+            noise_filter: crate::filter::NoiseFilterMode::Standard,
+            hallucination_filter: true,
+        });
+        let (core, mut rx) = Core::new(backend, VadConfig::default());
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+        let mut seen = vec![];
+        until_closed(&mut rx, &id, &mut seen).await;
+        let fin = seen.iter().find_map(|e| match e { Event::Final { text, .. } => Some(text.clone()), _ => None }).unwrap();
+        assert_eq!(fin, "");
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn release_mode_transcribes_speech_and_short_utterances_with_hallucination_filter() {
+        // 1 s tone and a brief 100 ms single-syllable tone (shorter than VAD min_speech_ms)
+        // must both still reach the engine in Release mode with hallucination_filter enabled.
+        let one_sec = [synth::silence(400), synth::tone(1000, 300.0, 6000.0), synth::silence(300)].concat();
+        let short_word = [synth::silence(400), synth::tone(100, 300.0, 6000.0), synth::silence(400)].concat();
+        let engine = Arc::new(FakeEngine::new("Ja"));
+        let backend = Arc::new(FilteredBackend {
+            engine: engine.clone(),
+            audio: Mutex::new(vec![(one_sec, false), (short_word, false)]),
+            noise_filter: crate::filter::NoiseFilterMode::Standard,
+            hallucination_filter: true,
+        });
+        let (core, mut rx) = Core::new(backend, VadConfig::default());
+
+        for expected_calls in [1usize, 2usize] {
+            let id = core.start_session(request("app", End::Release)).await.unwrap();
+            let mut seen = vec![];
+            until_closed(&mut rx, &id, &mut seen).await;
+            let fin = seen.iter().find_map(|e| match e { Event::Final { text, .. } => Some(text.clone()), _ => None }).unwrap();
+            assert!(fin.starts_with("Ja"), "expected transcription on call {expected_calls}, got {fin:?}");
+            assert_eq!(engine.calls.load(Ordering::SeqCst), expected_calls);
+        }
     }
 }

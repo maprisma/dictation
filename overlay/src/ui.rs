@@ -112,6 +112,8 @@ pub enum Message {
     Speak(u64, SpeakEvent),
     /// `--ask TEXT`, sent once the overlay has settled.
     AskNow(String),
+    /// Gear icon in the pill: open Maprisma Settings → Voice and close the overlay.
+    OpenSettings,
 }
 
 pub struct Overlay {
@@ -762,13 +764,17 @@ impl Overlay {
             _ if !m.text.is_empty() => "Enter",
             _ => "Esc",
         };
+        let gear = cosmic::widget::button::icon(cosmic::widget::icon::from_name("emblem-system-symbolic").size(14).symbolic(true))
+            .padding(4)
+            .on_press(Message::OpenSettings);
         row![
             space::horizontal().width(Length::Fixed(LEAD - 8.0)),
             field,
             container(text::caption(hint).class(theme::Text::Custom(dim_text))).padding([2, 6]).class(key_badge(&self.settings.skin)),
+            gear,
         ]
-        .spacing(8)
-        .padding([0, 12, 0, 0])
+        .spacing(6)
+        .padding([0, 10, 0, 0])
         .height(Length::Fixed(COMPACT.1))
         .align_y(cosmic::iced::Alignment::Center)
         .into()
@@ -1716,6 +1722,12 @@ impl cosmic::Application for Overlay {
             Message::AskNow(question) => {
                 let task = self.handle(Event::Typed(question));
                 return Task::batch([task, self.handle(Event::Submit)]);
+            }
+            Message::OpenSettings => {
+                if let Err(e) = crate::bar::settings_command().spawn() {
+                    eprintln!("maprisma-dictation: could not start maprisma-settings: {e}");
+                }
+                return self.run(vec![Effect::CancelVoice, Effect::Close]);
             }
             Message::Prepared(generation, targets) => {
                 if generation == self.turn_gen {

@@ -1,6 +1,6 @@
 [package]
 name = "maprisma-voice"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 description = "Maprisma voice service: one session D-Bus service for speech to text (later text to speech) for all Maprisma apps"

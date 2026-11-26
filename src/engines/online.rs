@@ -70,15 +70,28 @@ pub fn find(dirs: &Dirs) -> Option<Provider> {
     None
 }
 
-/// curl's arguments: no key here.
-pub fn curl_args(provider: &Provider, wav: &Path, language: &str) -> Vec<OsString> {
+/// curl's arguments: no key here. Uses `--form-string` for non-file fields so values starting
+/// with `@`/`<` can never read a file, and only asks for `verbose_json` on Whisper models
+/// (OpenAI's `gpt-4o-transcribe` family rejects `verbose_json`).
+pub fn curl_args(provider: &Provider, wav: &Path, language: &str, hallucination_filter: bool) -> Vec<OsString> {
     let mut args: Vec<OsString> = ["-sS", "--max-time", "60", "-K", "-", "-X", "POST"].map(OsString::from).to_vec();
     args.push(provider.endpoint.clone().into());
     let mut file = OsString::from("file=@");
     file.push(wav);
-    args.extend(["-F".into(), file, "-F".into(), format!("model={}", provider.model).into(), "-F".into(), "response_format=json".into(), "-F".into(), "temperature=0".into()]);
+    let verbose = hallucination_filter && provider.model.starts_with("whisper");
+    let format = if verbose { "response_format=verbose_json" } else { "response_format=json" };
+    args.extend([
+        "-F".into(),
+        file,
+        "--form-string".into(),
+        format!("model={}", provider.model).into(),
+        "--form-string".into(),
+        format.into(),
+        "--form-string".into(),
+        "temperature=0".into(),
+    ]);
     if language != "auto" {
-        args.extend(["-F".into(), format!("language={language}").into()]);
+        args.extend(["--form-string".into(), format!("language={language}").into()]);
     }
     args
 }
@@ -89,10 +102,10 @@ pub fn curl_config(provider: &Provider) -> String {
 }
 
 /// The `text` of a transcription answer, or the API's error message.
-pub fn parse_answer(body: &[u8]) -> Result<String, VoiceError> {
+pub fn parse_answer(body: &[u8], hallucination_filter: bool) -> Result<String, VoiceError> {
     let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| VoiceError::engine("the online service sent no JSON"))?;
-    if let Some(text) = value.get("text").and_then(|t| t.as_str()) {
-        return Ok(super::whisper::clean_text(text));
+    if value.get("text").and_then(|t| t.as_str()).is_some() || value.get("segments").and_then(|s| s.as_array()).is_some() {
+        return Ok(super::whisper::parse_response(&value, hallucination_filter));
     }
     let message = value.pointer("/error/message").and_then(|m| m.as_str()).unwrap_or("unknown error");
     Err(VoiceError::engine(format!("online transcription failed: {message}")))
@@ -101,6 +114,7 @@ pub fn parse_answer(body: &[u8]) -> Result<String, VoiceError> {
 pub struct OnlineEngine {
     pub dirs: Dirs,
     pub provider: Provider,
+    pub hallucination_filter: bool,
 }
 
 impl Engine for OnlineEngine {
@@ -116,7 +130,7 @@ impl Engine for OnlineEngine {
         let curl = self.dirs.which("curl").ok_or_else(|| VoiceError::not_ready("curl is not installed"))?;
         let wav = crate::tempwav::TempWav::create(&self.dirs, &crate::audio::wav_bytes(pcm)).map_err(|e| VoiceError::engine(format!("temporary audio file: {e}")))?;
         let mut command = Command::new(curl);
-        command.args(curl_args(&self.provider, wav.path(), language)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.args(curl_args(&self.provider, wav.path(), language, self.hallucination_filter)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = crate::procs::spawn(command).map_err(|e| VoiceError::engine(format!("curl: {e}")))?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(curl_config(&self.provider).as_bytes());
@@ -127,7 +141,7 @@ impl Engine for OnlineEngine {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(VoiceError::engine(format!("online transcription failed: {detail}")));
         }
-        parse_answer(&output.stdout)
+        parse_answer(&output.stdout, self.hallucination_filter)
     }
 }
 
@@ -176,21 +190,35 @@ mod tests {
     #[test]
     fn key_only_on_stdin() {
         let p = Provider::openai("sk-secret", "OPENAI_API_KEY");
-        let args = curl_args(&p, Path::new("/run/x/a.wav"), "de");
+        let args = curl_args(&p, Path::new("/run/x/a.wav"), "de", true);
         let joined: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(!joined.iter().any(|a| a.contains("sk-secret")));
         assert!(joined.contains(&"file=@/run/x/a.wav".to_string()));
+        assert!(joined.contains(&"--form-string".to_string()));
         assert!(joined.contains(&"model=whisper-1".to_string()));
+        assert!(joined.contains(&"response_format=verbose_json".to_string()));
         assert!(joined.contains(&"language=de".to_string()));
-        assert!(!curl_args(&p, Path::new("/a.wav"), "auto").iter().any(|a| a.to_string_lossy().starts_with("language=")));
+        // Only the file upload uses -F; text fields use --form-string.
+        assert_eq!(joined.iter().filter(|a| a.as_str() == "-F").count(), 1);
+        let plain = curl_args(&p, Path::new("/a.wav"), "auto", false);
+        assert!(!plain.iter().any(|a| a.to_string_lossy().starts_with("language=")));
+        assert!(plain.iter().any(|a| a.to_string_lossy() == "response_format=json"));
+        // Non-whisper models (e.g. gpt-4o-transcribe) must stay on json even with hallucination_filter=true.
+        let mut gpt = p.clone();
+        gpt.model = "gpt-4o-transcribe";
+        assert!(curl_args(&gpt, Path::new("/a.wav"), "en", true).iter().any(|a| a.to_string_lossy() == "response_format=json"));
         assert_eq!(curl_config(&p), "header = \"Authorization: Bearer sk-secret\"\n");
     }
 
     #[test]
     fn answers() {
-        assert_eq!(parse_answer(br#"{"text": " Hallo Welt. "}"#).unwrap(), "Hallo Welt.");
-        assert!(parse_answer(br#"{"error": {"message": "bad key"}}"#).unwrap_err().message.contains("bad key"));
-        assert!(parse_answer(b"<html>").is_err());
+        assert_eq!(parse_answer(br#"{"text": " Hallo Welt. "}"#, true).unwrap(), "Hallo Welt.");
+        assert_eq!(
+            parse_answer(br#"{"text": "Gracias.", "segments": [{"text": "Gracias.", "no_speech_prob": 0.85, "avg_logprob": -1.1}]}"#, true).unwrap(),
+            ""
+        );
+        assert!(parse_answer(br#"{"error": {"message": "bad key"}}"#, true).unwrap_err().message.contains("bad key"));
+        assert!(parse_answer(b"<html>", true).is_err());
     }
 
     /// The whole call with a fake curl: the key arrives on stdin only, the temporary WAV is
@@ -205,7 +233,7 @@ mod tests {
         );
         let bin = t.script("curl", &script);
         let dirs = Dirs::rooted(t.path(), bin.to_str().unwrap()).with_key("OPENAI_API_KEY", "sk-test-123");
-        let engine = OnlineEngine { provider: find(&dirs).unwrap(), dirs: dirs.clone() };
+        let engine = OnlineEngine { provider: find(&dirs).unwrap(), dirs: dirs.clone(), hallucination_filter: true };
         let text = engine.transcribe(&crate::audio::synth::tone(300, 200.0, 5000.0), "en").unwrap();
         assert_eq!(text, "hello online");
         let log = std::fs::read_to_string(&log).unwrap();

@@ -367,11 +367,20 @@ struct Setup {
     sensitivity: String,
     microphone: String,
     whisper_server: String,
+    noise_filter: String,
 }
 
 impl Setup {
     fn of(s: &Settings) -> Self {
-        Setup { phrase: s.wake_phrase.clone(), language: s.wake_language.clone(), model: s.wake_model.clone(), sensitivity: s.wake_sensitivity.clone(), microphone: s.microphone.clone(), whisper_server: s.whisper_server.clone() }
+        Setup {
+            phrase: s.wake_phrase.clone(),
+            language: s.wake_language.clone(),
+            model: s.wake_model.clone(),
+            sensitivity: s.wake_sensitivity.clone(),
+            microphone: s.microphone.clone(),
+            whisper_server: s.whisper_server.clone(),
+            noise_filter: s.noise_filter.clone(),
+        }
     }
 }
 
@@ -577,6 +586,7 @@ impl Wake {
     /// returns.
     async fn listen(&self, mut capture: Capture, recogniser: Arc<dyn Engine>, setup: Setup) -> Ended {
         let mut segmenter = Segmenter::new(self.segments);
+        let mut filter = crate::filter::AudioFilter::new(crate::filter::NoiseFilterMode::parse(&setup.noise_filter));
         let mut mic_rx = self.mic.subscribe();
         let mut stop_rx = self.stop.subscribe();
         let mut tick = tokio::time::interval(self.timing.tick);
@@ -595,6 +605,10 @@ impl Wake {
             tokio::select! {
                 chunk = capture.chunks.recv() => {
                     let Some(chunk) = chunk else { break Ended::RecorderGone };
+                    let Some(chunk) = filter.process_chunk(&chunk) else { continue };
+                    if chunk.is_empty() {
+                        continue;
+                    }
                     if let Some(segment) = segmenter.feed(&chunk) {
                         if job.is_none() { job = Some(start(segment)) } else { waiting = Some(segment) }
                     }
@@ -645,6 +659,7 @@ impl Wake {
         let microphone = s.microphone.clone();
         let mut capture = tokio::task::spawn_blocking(move || host.capture(&microphone)).await.map_err(|e| VoiceError::recorder(e.to_string()))??;
         let mut segmenter = Segmenter::new(self.segments);
+        let mut filter = crate::filter::AudioFilter::new(crate::filter::NoiseFilterMode::parse(&s.noise_filter));
         let until = tokio::time::Instant::now() + Duration::from_secs(u64::from(seconds.clamp(1, 10)));
         let mut mic_rx = self.mic.subscribe();
         let segment = loop {
@@ -657,7 +672,15 @@ impl Wake {
                 _ = tokio::time::sleep_until(until) => break None,
                 chunk = capture.chunks.recv() => match chunk {
                     None => break None,
-                    Some(chunk) => if let Some(segment) = segmenter.feed(&chunk) { break Some(segment) },
+                    Some(chunk) => {
+                        let Some(chunk) = filter.process_chunk(&chunk) else { continue };
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        if let Some(segment) = segmenter.feed(&chunk) {
+                            break Some(segment);
+                        }
+                    }
                 },
             }
         };
@@ -776,7 +799,13 @@ impl WakeHost for RealHost {
         let models = crate::models::discover(&self.dirs);
         let model = pick_model(&models, &s.wake_model).ok_or("no_model")?;
         crate::recorder::find(&self.dirs).ok_or("no_recorder")?;
-        Ok(Arc::new(crate::engines::whisper::WhisperEngine { server: self.server.clone(), binary, model: model.path.clone() }))
+        // Keep hallucination_filter off for short 2-word wake phrases (AudioFilter + clean_text still apply).
+        Ok(Arc::new(crate::engines::whisper::WhisperEngine {
+            server: self.server.clone(),
+            binary,
+            model: model.path.clone(),
+            hallucination_filter: false,
+        }))
     }
 
     fn capture(&self, microphone: &str) -> Result<Capture, VoiceError> {

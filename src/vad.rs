@@ -25,6 +25,17 @@ impl Default for VadConfig {
     }
 }
 
+impl VadConfig {
+    /// Preset VAD parameters for the `vad_sensitivity` setting (`strict`, `normal`, `sensitive`).
+    pub fn for_sensitivity(s: &str) -> Self {
+        match s {
+            "strict" => VadConfig { min_threshold: 0.024, ratio: 4.0, min_speech_ms: 200, silence_ms: 900, ..Default::default() },
+            "sensitive" => VadConfig { min_threshold: 0.006, ratio: 2.2, min_speech_ms: 120, silence_ms: 1000, ..Default::default() },
+            _ => Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Continue,
@@ -59,6 +70,10 @@ impl Vad {
 
     pub fn elapsed_ms(&self) -> u32 {
         self.elapsed_ms
+    }
+
+    pub fn speech_run_ms(&self) -> u32 {
+        self.speech_run_ms
     }
 
     pub fn threshold(&self) -> f64 {
@@ -172,5 +187,21 @@ mod tests {
         assert!(vad.threshold() > 0.03);
         let (d, _) = run(&mut vad, &concat(&[synth::tone(500, 200.0, 12000.0), synth::noise(1000, 1200)]));
         assert_eq!(d, Decision::Finish);
+    }
+
+    #[test]
+    fn sensitivity_presets_order_strict_normal_sensitive() {
+        let strict = VadConfig::for_sensitivity("strict");
+        let normal = VadConfig::for_sensitivity("normal");
+        let sensitive = VadConfig::for_sensitivity("sensitive");
+        assert_eq!(normal, VadConfig::default());
+        assert_eq!(VadConfig::for_sensitivity("unknown"), VadConfig::default());
+        assert!(strict.min_threshold > normal.min_threshold);
+        assert!(normal.min_threshold > sensitive.min_threshold);
+        assert!(strict.ratio > normal.ratio);
+        assert!(normal.ratio > sensitive.ratio);
+        assert!(strict.min_speech_ms > normal.min_speech_ms);
+        assert!(normal.min_speech_ms > sensitive.min_speech_ms);
+        assert_eq!((strict.silence_ms, normal.silence_ms, sensitive.silence_ms), (900, 900, 1000));
     }
 }

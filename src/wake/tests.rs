@@ -210,7 +210,12 @@ struct FakeHost {
 impl FakeHost {
     fn new() -> Arc<FakeHost> {
         let host = FakeHost::default();
-        host.settings.lock().unwrap().wake_enabled = true;
+        {
+            let mut s = host.settings.lock().unwrap();
+            s.wake_enabled = true;
+            // Synthetic square-gated tone tests check exact unfiltered segment lengths.
+            s.noise_filter = "off".into();
+        }
         Arc::new(host)
     }
     fn open_now(&self) -> usize {
@@ -389,7 +394,14 @@ struct CheckingBackend {
 
 impl Backend for CheckingBackend {
     fn prepare(&self, _request: &SessionRequest) -> Result<Prepared, VoiceError> {
-        Ok(Prepared { engine: self.engine.clone(), language: "auto".into(), microphone: "default".into() })
+        Ok(Prepared {
+            engine: self.engine.clone(),
+            language: "auto".into(),
+            microphone: "default".into(),
+            noise_filter: crate::filter::NoiseFilterMode::Off,
+            vad: None,
+            hallucination_filter: false,
+        })
     }
     fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
         self.captures.fetch_add(1, Ordering::SeqCst);
@@ -505,12 +517,28 @@ async fn wake_test_pauses_the_listener() {
     wake.shutdown();
 }
 
-#[test]
-fn every_why_not_has_a_message() {
-    for code in WHY_NOT_CODES {
-        let key = why_not_key(code);
-        let en = crate::i18n::tr_in(0, key);
-        assert_eq!(en, key, "{code} must be a catalog key");
-        assert_ne!(crate::i18n::tr_in(1, key), key, "{code} needs German");
+    #[test]
+    fn every_why_not_has_a_message() {
+        for code in WHY_NOT_CODES {
+            let key = why_not_key(code);
+            let en = crate::i18n::tr_in(0, key);
+            assert_eq!(en, key, "{code} must be a catalog key");
+            assert_ne!(crate::i18n::tr_in(1, key), key, "{code} needs German");
+        }
     }
-}
+
+    #[tokio::test]
+    async fn wake_listener_filters_startup_dc_pop_and_hears_phrase() {
+        let host = FakeHost::new();
+        host.settings.lock().unwrap().noise_filter = "standard".into();
+        // 350 ms Razer Kiyo DC pop, then quiet, then speech, then quiet.
+        let pop = vec![16000i16; (crate::audio::RATE as usize * 350) / 1000];
+        let stream = [pop, synth::silence(600), synth::tone(1000, 220.0, 6000.0), synth::silence(1000)].concat();
+        host.audio.lock().unwrap().push_back(stream);
+        host.texts.lock().unwrap().push_back("Hey Linux".into());
+        let (wake, mut rx, _task) = start(host.clone(), Arc::new(MicShare::default()));
+        assert_eq!(next_heard(&mut rx).await, ("Hey Linux".into(), String::new()));
+        // Only the speech segment (not the pop) triggered transcription.
+        assert_eq!(host.heard_ms.lock().unwrap().len(), 1);
+        wake.shutdown();
+    }

@@ -197,9 +197,17 @@ impl Command {
         toggle_command(std::env::current_exe().ok().as_deref(), &crate::paths::home())
     }
 
-    /// Starts it in the background (stdin closed); a thread reaps it.
+    /// Starts it detached in its own process group (stdin/stdout/stderr closed); a thread reaps it.
     pub fn spawn(&self) -> std::io::Result<()> {
-        let mut child = std::process::Command::new(&self.program).args(&self.args).stdin(std::process::Stdio::null()).spawn()?;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        let mut child = std::process::Command::new(&self.program)
+            .args(&self.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()?;
         std::thread::spawn(move || {
             let _ = child.wait();
         });

@@ -7,6 +7,8 @@ use crate::paths::Dirs;
 use serde_json::{Map, Value};
 
 pub const ENGINES: [&str; 6] = ["auto", "whisper", "online", "voxtype", "superwhisper", "omarchy"];
+pub const NOISE_FILTERS: [&str; 3] = ["off", "standard", "strong"];
+pub const VAD_SENSITIVITIES: [&str; 3] = ["strict", "normal", "sensitive"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -39,6 +41,12 @@ pub struct Settings {
     pub wake_model: String,
     /// One of [SENSITIVITIES]: how far what was heard may be from the phrase.
     pub wake_sensitivity: String,
+    /// One of [NOISE_FILTERS]: audio cleanup before VAD and transcription (`off`, `standard`, `strong`).
+    pub noise_filter: String,
+    /// One of [VAD_SENSITIVITIES]: voice activity detection sensitivity (`strict`, `normal`, `sensitive`).
+    pub vad_sensitivity: String,
+    /// Reject likely Whisper hallucinations on silence/noise (verbose_json thresholds + phantom phrases).
+    pub hallucination_filter: bool,
 }
 
 pub const SENSITIVITIES: [&str; 3] = ["strict", "normal", "loose"];
@@ -72,6 +80,9 @@ impl Default for Settings {
             wake_language: "auto".into(),
             wake_model: String::new(),
             wake_sensitivity: "normal".into(),
+            noise_filter: "standard".into(),
+            vad_sensitivity: "normal".into(),
+            hallucination_filter: true,
         }
     }
 }
@@ -111,6 +122,9 @@ pub fn parse(value: &Value) -> Settings {
         wake_language: text("wake_language").filter(|l| valid_language(l)).unwrap_or(&d.wake_language).into(),
         wake_model: text("wake_model").filter(|m| crate::models::valid_setting(m)).unwrap_or("").into(),
         wake_sensitivity: text("wake_sensitivity").filter(|s| SENSITIVITIES.contains(s)).unwrap_or(&d.wake_sensitivity).into(),
+        noise_filter: text("noise_filter").filter(|f| NOISE_FILTERS.contains(f)).unwrap_or(&d.noise_filter).into(),
+        vad_sensitivity: text("vad_sensitivity").filter(|s| VAD_SENSITIVITIES.contains(s)).unwrap_or(&d.vad_sensitivity).into(),
+        hallucination_filter: value.get("hallucination_filter").and_then(Value::as_bool).unwrap_or(d.hallucination_filter),
     }
 }
 
@@ -129,11 +143,13 @@ pub fn load(dirs: &Dirs) -> Settings {
 /// Checks a value for one of our keys before it is written (the CLI's `set`).
 pub fn check(key: &str, value: &Value) -> Result<(), String> {
     let ok = match key {
-        "enabled" | "preload" | "wake_enabled" => value.is_boolean(),
+        "enabled" | "preload" | "wake_enabled" | "hallucination_filter" => value.is_boolean(),
         "wake_phrase" => value.as_str().is_some_and(valid_wake_phrase),
         "wake_language" => value.as_str().is_some_and(valid_language),
         "wake_model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
         "wake_sensitivity" => value.as_str().is_some_and(|s| SENSITIVITIES.contains(&s)),
+        "noise_filter" => value.as_str().is_some_and(|f| NOISE_FILTERS.contains(&f)),
+        "vad_sensitivity" => value.as_str().is_some_and(|s| VAD_SENSITIVITIES.contains(&s)),
         "unload_minutes" => value.as_u64().is_some_and(|m| m <= 1440),
         "engine" => value.as_str().is_some_and(|e| ENGINES.contains(&e)),
         "model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
@@ -276,5 +292,30 @@ mod tests {
             assert!(check("wake_sensitivity", &json!(s)).is_ok());
         }
         assert!(check("wake_sensitivity", &json!("medium")).is_err());
+    }
+
+    #[test]
+    fn audio_cleanup_settings() {
+        let d = parse(&json!({}));
+        assert_eq!((d.noise_filter.as_str(), d.vad_sensitivity.as_str(), d.hallucination_filter), ("standard", "normal", true));
+        let s = parse(&json!({"noise_filter": "strong", "vad_sensitivity": "strict", "hallucination_filter": false}));
+        assert_eq!((s.noise_filter.as_str(), s.vad_sensitivity.as_str(), s.hallucination_filter), ("strong", "strict", false));
+        let broken = parse(&json!({"noise_filter": "ultra", "vad_sensitivity": "loose", "hallucination_filter": "yes"}));
+        assert_eq!(broken, Settings::default());
+        for f in NOISE_FILTERS {
+            assert!(check("noise_filter", &json!(f)).is_ok());
+            assert_eq!(parse(&json!({"noise_filter": f})).noise_filter, f);
+        }
+        assert!(check("noise_filter", &json!("ultra")).is_err());
+        assert!(check("noise_filter", &json!(true)).is_err());
+        for v in VAD_SENSITIVITIES {
+            assert!(check("vad_sensitivity", &json!(v)).is_ok());
+            assert_eq!(parse(&json!({"vad_sensitivity": v})).vad_sensitivity, v);
+        }
+        assert!(check("vad_sensitivity", &json!("loose")).is_err());
+        assert!(check("vad_sensitivity", &json!(1)).is_err());
+        assert!(check("hallucination_filter", &json!(true)).is_ok());
+        assert!(check("hallucination_filter", &json!(false)).is_ok());
+        assert!(check("hallucination_filter", &json!("true")).is_err());
     }
 }
