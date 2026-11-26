@@ -3269,9 +3269,22 @@ dependencies = [
  "futures-util",
  "libc",
  "libcosmic",
+ "maprisma-kit",
  "maprisma-voice",
- "png 0.18.1",
  "regex",
+ "serde_json",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
+name = "maprisma-kit"
+version = "0.1.0"
+source = "git+https://github.com/maprisma/maprisma-kit-rs?tag=v0.1.0#16dd2958c70630286a1d04518b3d5589ac7d0eaa"
+dependencies = [
+ "libc",
+ "libcosmic",
+ "png 0.18.1",
  "serde_json",
  "tokio",
  "zbus",

@@ -96,7 +96,7 @@ fn main() -> cosmic::iced::Result {
             std::process::exit(1);
         }
     };
-    let result = cosmic::app::run::<ui::Overlay>(cosmic::app::Settings::default().default_font(maprisma_dictation::look::default_font()).no_main_window(true).transparent(true).exit_on_close(false), flags);
+    let result = cosmic::app::run::<ui::Overlay>(cosmic::app::Settings::default().default_font(maprisma_kit::look::default_font()).no_main_window(true).transparent(true).exit_on_close(false), flags);
     ui::finish_helper_kills();
     drop(connection);
     result

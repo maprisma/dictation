@@ -13,7 +13,8 @@ use crate::markdown::{self, Block};
 use crate::settings::{self, Settings};
 use crate::state::{Effect, End, Event, Machine, Phase};
 use crate::voice::{self, Control, Controls, SpeakEvent, VoiceEvent};
-use crate::{corners, fonts, look, shot, skin};
+use crate::{fonts, skin};
+use maprisma_kit::{AppInfo, corners, look, shot};
 use cosmic::app::{Core, Task};
 use cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput;
 use cosmic::iced::event::wayland::{Event as WaylandEvent, OutputEvent};
@@ -33,7 +34,7 @@ use std::time::{Duration, Instant};
 
 pub const APP_ID: &str = "com.maprisma.Dictation";
 // F12 pictures go to ~/Pictures/<this>/ (the app's name, the same in every language).
-const SHOT_FOLDER: &str = "Maprisma Dictation";
+const SHOT_APP: AppInfo = AppInfo::new(APP_ID, "Maprisma Dictation");
 static DEBUG: LazyLock<bool> = LazyLock::new(|| std::env::var_os("MAPRISMA_DICTATION_DEBUG").is_some());
 static INPUT_ID: LazyLock<cosmic::widget::Id> = LazyLock::new(|| cosmic::widget::Id::new("dictation-input"));
 
@@ -881,7 +882,7 @@ impl Overlay {
                 ]);
                 if !output.is_empty() {
                     let shown: String = output.chars().take(4000).collect();
-                    c = c.push(container(text::body(shown).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(code_box(&self.settings.skin)));
+                    c = c.push(container(text::body(shown).font(look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(code_box(&self.settings.skin)));
                 }
                 c.into()
             }
@@ -900,7 +901,7 @@ impl Overlay {
         let mut c = cosmic::iced::widget::Column::new().spacing(6).push(row![text::body("!").class(theme::Text::Custom(warning_text)).width(Length::Fixed(16.0)), text::heading(what)]);
         match &item.action {
             Some(schema::Action::RunCommand { argv, why }) => {
-                c = c.push(container(text::body(shell_words(argv)).font(crate::look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(code_box(&self.settings.skin)));
+                c = c.push(container(text::body(shell_words(argv)).font(look::mono_font()).size(12.5)).padding(8).width(Length::Fill).class(code_box(&self.settings.skin)));
                 if !why.is_empty() {
                     c = c.push(text::caption(why.clone()).class(theme::Text::Custom(dim_text)));
                 }
@@ -1085,7 +1086,7 @@ fn rich(raw: &str, size: f32, line: f32, weight: cosmic::iced::font::Weight) -> 
         .map(|s| {
             if s.code {
                 return span(s.text)
-                    .font(cosmic::font::Font { weight: if s.bold { Weight::Bold } else { Weight::Normal }, ..crate::look::mono_font() })
+                    .font(cosmic::font::Font { weight: if s.bold { Weight::Bold } else { Weight::Normal }, ..look::mono_font() })
                     .size(size * 0.88)
                     .background(tint)
                     .border(Border { radius: corners::now().small.into(), ..Default::default() })
@@ -1116,7 +1117,7 @@ fn block_view(block: &Block, kind: Type, skin_name: &str) -> Element<'static, Me
             ]
             .into()
         }
-        Block::Code(t) => container(text::body(t.clone()).font(crate::look::mono_font()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(code_box(skin_name)).into(),
+        Block::Code(t) => container(text::body(t.clone()).font(look::mono_font()).size(if kind == Type::Compact { 12.5 } else { 13.5 })).padding(8).width(Length::Fill).class(code_box(skin_name)).into(),
     }
 }
 
@@ -1427,7 +1428,7 @@ impl cosmic::Application for Overlay {
 
     fn init(core: Core, flags: Flags) -> (Self, Task<Message>) {
         let mut core = core;
-        crate::look::solid(&mut core);
+        look::solid(&mut core);
         let settings = settings::read();
         maprisma_voice::i18n::set_language(&settings.language);
         corners::set_current(&settings.corners);
@@ -1822,7 +1823,7 @@ impl cosmic::Application for Overlay {
                     return Task::none();
                 }
                 let (width, height) = (picture.size.width, picture.size.height);
-                return off_thread(move || shot::save_screenshot(SHOT_FOLDER, &picture.rgba, width, height), Message::ShotSaved);
+                return off_thread(move || shot::save_screenshot_for(&SHOT_APP, &picture.rgba, width, height), Message::ShotSaved);
             }
             Message::ShotSaved(result) => {
                 let text = match result {
@@ -1847,12 +1848,12 @@ impl cosmic::Application for Overlay {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        crate::look::keep_fonts();
+        look::keep_fonts();
         space::horizontal().width(Length::Fixed(1.0)).into()
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
-        crate::look::keep_fonts();
+        look::keep_fonts();
         if Some(id) == self.catcher {
             return mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill)).on_press(Message::ClickOutside).into();
         }

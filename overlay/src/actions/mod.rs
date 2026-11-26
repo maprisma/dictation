@@ -436,7 +436,7 @@ mod tests {
         };
         assert!(matches!(&t.items[i].action, Some(Action::RunCommand { argv, .. }) if argv[0] == "uname"));
         assert_eq!(t.confirm(), Some(i));
-        let ctx = exec::Context { desktop: crate::look::Desktop::Other, language: "en".into(), weather_location: String::new() };
+        let ctx = exec::Context { desktop: maprisma_kit::look::Desktop::Other, language: "en".into(), weather_location: String::new() };
         let outcome = exec::execute(t.items[i].action.as_ref().unwrap(), &t.items[i].target, &ctx);
         let expected = String::from_utf8(std::process::Command::new("uname").arg("-r").output().unwrap().stdout).unwrap();
         println!("ran: {outcome:?}");

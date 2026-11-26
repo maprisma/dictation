@@ -72,7 +72,7 @@ pub fn parse(bytes: &[u8]) -> Settings {
         s.language = l.into();
     }
     if let Some(c) = text("corners") {
-        s.corners = crate::corners::normalize(c).into();
+        s.corners = maprisma_kit::corners::normalize(c).into();
     }
     if let Some(sk) = text(crate::skin::SKIN_KEY) {
         s.skin = crate::skin::normalize_skin(sk).into();
@@ -161,8 +161,8 @@ pub fn set(key: &str, value: Value) -> std::io::Result<()> {
 /// Whether the desktop asks for less motion: Plasma's animation speed at 0 (kdeglobals
 /// `[KDE] AnimationDurationFactor=0`), Hyprland's `animations:enabled` off, GNOME/GTK's
 /// `enable-animations` off (also read by COSMIC apps through gsettings when present).
-pub fn desktop_reduces_motion(desktop: crate::look::Desktop) -> bool {
-    use crate::look::Desktop;
+pub fn desktop_reduces_motion(desktop: maprisma_kit::look::Desktop) -> bool {
+    use maprisma_kit::look::Desktop;
     match desktop {
         Desktop::Kde => {
             let file = crate::paths::config_root().join("kdeglobals");

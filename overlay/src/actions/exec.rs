@@ -6,7 +6,7 @@ use super::desktop::{self, HyprWindow, Plan, Step};
 use super::schema::{Action, Media, ThemeMode};
 use super::system::{self, ThemePick};
 use super::weather::{self, LookupError, Weather};
-use crate::look::Desktop;
+use maprisma_kit::look::Desktop;
 use maprisma_voice::i18n::{tr, trf};
 use std::io::Read;
 use std::os::unix::process::CommandExt;

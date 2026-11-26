@@ -29,8 +29,7 @@ tokio = { version = "1", features = ["process", "io-util", "time", "macros", "rt
 futures-util = "0.3"
 serde_json = "1"
 libc = "0.2"
-# Already in the dependency tree (libcosmic): F12 screenshots (PNG).
-png = "0.18"
+maprisma-kit = { git = "https://github.com/maprisma/maprisma-kit-rs", tag = "v0.1.0" }
 
 [dev-dependencies]
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }

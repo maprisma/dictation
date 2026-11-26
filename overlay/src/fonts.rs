@@ -6,7 +6,7 @@
 //! it is GTK's `org.gnome.desktop.interface font-name`, as GTK apps there show it. A family
 //! that isn't installed is left alone (libcosmic's font then).
 
-use crate::look::Desktop;
+use maprisma_kit::look::Desktop;
 use std::sync::OnceLock;
 use std::time::Duration;
 

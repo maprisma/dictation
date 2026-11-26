@@ -22,8 +22,8 @@ pub struct SkinStyle {
 }
 
 impl SkinStyle {
-    pub fn palette(&self) -> crate::look::Palette {
-        crate::look::Palette {
+    pub fn palette(&self) -> maprisma_kit::look::Palette {
+        maprisma_kit::look::Palette {
             accent: Some(self.accent_rgb),
             background: Some(self.window_bg),
             foreground: Some(self.foreground),
@@ -108,10 +108,10 @@ pub fn skin_label(skin: &str) -> String {
 
 pub fn active_theme(skin: &str, corners_choice: &str) -> Option<cosmic::Theme> {
     if let Some(st) = skin_style(skin) {
-        let radius = crate::corners::radius(corners_choice, crate::corners::desktop_radius());
-        Some(crate::look::theme_from(&st.palette(), Some(radius)))
+        let radius = maprisma_kit::corners::radius(corners_choice, maprisma_kit::corners::desktop_radius());
+        Some(maprisma_kit::look::theme_from(&st.palette(), Some(radius)))
     } else {
-        crate::corners::theme(corners_choice)
+        maprisma_kit::corners::theme(corners_choice)
     }
 }
 
@@ -119,7 +119,7 @@ pub fn set_app_theme<M: Send + 'static>(skin: &str, corners_choice: &str) -> cos
     let theme = active_theme(skin, corners_choice).unwrap_or_else(cosmic::theme::system_preference);
     cosmic::Task::batch([
         cosmic::command::set_theme(theme),
-        cosmic::command::set_scaling_factor(crate::look::text_scale()),
+        cosmic::command::set_scaling_factor(maprisma_kit::look::text_scale()),
     ])
 }
 
@@ -139,7 +139,7 @@ pub fn apply_popup<'a, M: 'static>(
                     .class(theme::Container::custom(move |_| iced_container::Style {
                         background: Some(Background::Color(bg)),
                         text_color: Some(fg),
-                        border: Border { radius: crate::corners::now().radius.into(), ..Default::default() },
+                        border: Border { radius: maprisma_kit::corners::now().radius.into(), ..Default::default() },
                         ..Default::default()
                     }))
                     .into()
@@ -162,7 +162,7 @@ pub fn swatch_dot<'a, M: 'a>(c: Color, size: f32) -> Element<'a, M> {
             let base = Color::from(theme.cosmic().on_bg_color());
             iced_container::Style {
                 background: Some(Background::Color(c)),
-                border: Border { radius: crate::corners::now().small.into(), width: 1.0, color: with_alpha(base, 0.3) },
+                border: Border { radius: maprisma_kit::corners::now().small.into(), width: 1.0, color: with_alpha(base, 0.3) },
                 ..Default::default()
             }
         }))

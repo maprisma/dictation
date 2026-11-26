@@ -11,7 +11,7 @@
 //! ([kwin_script]); no report means it failed.
 //! | COSMIC | no interface for other apps: unsupported | unsupported | unsupported |
 
-use crate::look::Desktop;
+use maprisma_kit::look::Desktop;
 
 /// One way of doing it; exec.rs tries them in order until one works.
 #[derive(Debug, Clone, PartialEq, Eq)]

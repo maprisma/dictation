@@ -5,7 +5,8 @@
 //! Corners). The icon follows the overlay and the voice service (src/bar.rs).
 
 use maprisma_dictation::bar::{self, Command, Shown};
-use maprisma_dictation::{corners, look, settings, skin};
+use maprisma_dictation::{settings, skin};
+use maprisma_kit::{corners, look};
 use maprisma_voice::i18n::{LANGUAGES, tr, trf};
 use std::sync::LazyLock;
 use std::time::Duration;
