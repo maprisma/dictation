@@ -224,7 +224,7 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
           _setPhase(MicPhase.transcribing);
         }
       case VoiceLevel(:final rms):
-        _ring.target = rms;
+        _ring.target = levelFromRms(rms);
       case VoicePartial(:final text):
         _partial(text.trim().isEmpty ? widget.tr('Listening…') : text);
       case VoiceFinal(:final text, :final typed):
@@ -331,6 +331,13 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
       ),
     );
   }
+}
+
+/// Converts linear microphone RMS (0…1) to a perceptual 0…1 ring level (−50 dBFS → 0, −16 dBFS → 1).
+double levelFromRms(double rms) {
+  if (!rms.isFinite || rms <= 0) return 0;
+  final db = 20 * math.log(rms) / math.ln10;
+  return ((db + 50) / 34).clamp(0.0, 1.0);
 }
 
 /// The ring's moving parts: level envelope (attack 30 ms, release 130 ms), ripple, flash, shake.

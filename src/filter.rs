@@ -467,8 +467,7 @@ impl AudioFilter {
         self.elapsed_ms = self.elapsed_ms.saturating_add(ms);
 
         let guard_ms = match self.mode {
-            NoiseFilterMode::Standard => 450,
-            NoiseFilterMode::Strong => 500,
+            NoiseFilterMode::Standard | NoiseFilterMode::Strong => 500,
             NoiseFilterMode::Off => 0,
         };
         if !self.guard_done {
@@ -484,7 +483,13 @@ impl AudioFilter {
                 if mean_dc.abs() > 0.025 {
                     self.saw_dc_spike = true;
                 }
-                if prev_elapsed < 150 || mean_dc.abs() > 0.015 || (self.saw_dc_spike && rms_raw > 0.04) {
+                // After a real USB DC wake-up pop (e.g. Razer Kiyo V2 X), also drop the
+                // decaying tail chunk (~350 ms, |dc| ≈ 0.013, rms ≈ 0.025) so it cannot
+                // poison the VAD's initial calibration noise floor.
+                if prev_elapsed < 150
+                    || mean_dc.abs() > 0.015
+                    || (self.saw_dc_spike && (mean_dc.abs() > 0.005 || rms_raw > 0.015))
+                {
                     return None;
                 }
             }
@@ -591,6 +596,35 @@ mod tests {
             assert!(emitted_chunks > 10, "{mode:?}: quiet room after pop should still stream");
             assert!(!vad.heard_speech(), "{mode:?}: pop fooled VAD into hearing speech");
         }
+    }
+
+    #[test]
+    fn drops_razer_kiyo_decay_tail_so_vad_threshold_stays_low() {
+        // Real Razer Kiyo V2 X wake-up profile: 300 ms strong DC pop followed by a 50 ms
+        // decaying tail chunk (dc ≈ -0.013, rms ≈ 0.025) and then quiet room noise (rms ≈ 0.0025).
+        let pop = vec![24000i16; CHUNK_SAMPLES * 6]; // 300 ms strong positive DC spike
+        // Decaying tail chunk: dc ≈ -0.013, ac ≈ 0.021 -> rms ≈ 0.025
+        let tail: Vec<i16> = (0..CHUNK_SAMPLES)
+            .map(|i| ((-0.013 + 0.030 * (i as f64 * 0.09).sin()) * 32768.0) as i16)
+            .collect();
+        let quiet = synth::noise(500, 140); // rms ≈ 0.0025
+        let speech = synth::tone(500, 260.0, 900.0); // modest desk speech: rms ≈ 0.019
+        let stream = [pop, tail, quiet, speech].concat();
+
+        let mut f = AudioFilter::new(NoiseFilterMode::Standard);
+        let mut vad = crate::vad::Vad::new(crate::vad::VadConfig::default(), true);
+        for (idx, chunk) in stream.chunks(CHUNK_SAMPLES).enumerate() {
+            let res = f.process_chunk_with_level(chunk);
+            if idx <= 6 {
+                assert!(res.is_none(), "pop or decay tail chunk {idx} leaked into VAD");
+                continue;
+            }
+            if let Some(clean) = res {
+                vad.feed(clean.vad_rms, audio::ms_of(clean.samples.len()) as u32);
+            }
+        }
+        assert!(vad.threshold() < 0.015, "VAD threshold was poisoned by pop tail: {}", vad.threshold());
+        assert!(vad.heard_speech(), "modest speech after pop tail was missed by VAD");
     }
 
     #[test]

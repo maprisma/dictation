@@ -109,14 +109,34 @@ pub fn aura_colors(accent: Rgb, dark: bool, tone: Tone) -> AuraColors {
     }
 }
 
-/// The microphone's RMS (0…1, linear) as a level 0…1 for the ring: −50 dBFS and below is 0,
-/// −12 dBFS and above is 1 (speech sits in between).
+/// The microphone's RMS (0…1, linear) as a level 0…1 for the ring and mic meter: −50 dBFS and
+/// below is 0, −16 dBFS and above is 1 (desk-mic speech sits clearly in between).
 pub fn level_from_rms(rms: f64) -> f32 {
     if !rms.is_finite() || rms <= 0.0 {
         return 0.0;
     }
     let db = 20.0 * rms.log10();
-    ((db + 50.0) / 38.0).clamp(0.0, 1.0) as f32
+    ((db + 50.0) / 34.0).clamp(0.0, 1.0) as f32
+}
+
+/// Visual bar heights (px, 3…22) for the 5-bar live microphone meter left of the field while
+/// listening. `levels` holds the 5 smoothed recent chunks (0…1); `live` is true once the voice
+/// service has delivered audio chunks (after any USB mic warm-up guard).
+pub fn mic_bar_heights(levels: [f32; 5], t: f32, live: bool, reduced: bool) -> [f32; 5] {
+    const PROFILE: [f32; 5] = [0.62, 0.86, 1.0, 0.86, 0.62];
+    if !live {
+        return [3.0; 5];
+    }
+    let mut out = [3.0; 5];
+    for i in 0..5 {
+        let lvl = levels[i].clamp(0.0, 1.0);
+        // Gentle perceptual lift so modest desk-distance speech clearly animates the bars.
+        let shaped = lvl.powf(0.72);
+        let idle = if reduced { 0.35 } else { 0.5 + 0.5 * (2.0 * PI * 1.4 * t + i as f32 * 0.95).sin() };
+        let base = 3.5 + 1.8 * idle * (1.0 - shaped);
+        out[i] = (base + 17.5 * shaped * PROFILE[i]).clamp(3.0, 22.0);
+    }
+    out
 }
 
 /// Attack 30 ms, release 130 ms.
@@ -331,6 +351,21 @@ mod tests {
         assert!((0.4..0.8).contains(&speech), "{speech}");
         assert_eq!((stroke_width(0.0), stroke_width(1.0), stroke_width(2.0)), (1.5, 3.5, 3.5));
         assert_eq!((bloom(0.0), bloom(1.0)), (0.15, 0.65));
+    }
+
+    #[test]
+    fn mic_bars_distinguish_warming_quiet_and_speech() {
+        // Before audio arrives: flat 3 px dots.
+        assert_eq!(mic_bar_heights([0.0; 5], 0.5, false, false), [3.0; 5]);
+        // Live quiet room: gentle low wave (> 3 px, < 6 px).
+        let quiet = mic_bar_heights([0.0; 5], 0.25, true, false);
+        assert!(quiet.iter().all(|&h| (3.4..=5.5).contains(&h)), "{quiet:?}");
+        // Modest speech: visibly taller than quiet, center bar tallest.
+        let speech = mic_bar_heights([0.35; 5], 0.25, true, true);
+        assert!(speech[2] > 11.0 && speech[2] > speech[0], "{speech:?}");
+        // Loud speech stays clamped at 22 px.
+        let loud = mic_bar_heights([1.0; 5], 0.25, true, false);
+        assert!(loud.iter().all(|&h| h <= 22.0) && loud[2] >= 20.5, "{loud:?}");
     }
 
     #[test]

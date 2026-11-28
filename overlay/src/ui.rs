@@ -142,6 +142,11 @@ pub struct Overlay {
     // animation
     envelope: Envelope,
     target_level: f32,
+    /// Five-bar live microphone level history (newest at index 4) + smoothed envelopes.
+    bar_targets: [f32; 5],
+    bar_envelopes: [Envelope; 5],
+    /// True once at least one audio `Level` chunk arrived in the current listening session.
+    mic_live: bool,
     last_frame: Instant,
     phase_since: Instant,
     done_at: Option<Instant>,
@@ -451,6 +456,9 @@ impl Overlay {
                     self.queued.clear();
                     self.envelope = Envelope::default();
                     self.target_level = 0.0;
+                    self.bar_targets = [0.0; 5];
+                    self.bar_envelopes = [Envelope::default(); 5];
+                    self.mic_live = false;
                 }
                 Effect::FinishVoice => self.send_control(Control::Finish),
                 Effect::CancelVoice => {
@@ -461,6 +469,8 @@ impl Overlay {
                     self.voice_on = None;
                     self.queued.clear();
                     self.target_level = 0.0;
+                    self.bar_targets = [0.0; 5];
+                    self.mic_live = false;
                 }
                 Effect::Ask(question) => {
                     self.body_height = None;
@@ -722,6 +732,8 @@ impl Overlay {
             skin_border: skin_st.map(|st| (st.border_tint, st.border_width)),
             mode,
             level: self.envelope.value,
+            bar_levels: self.bar_envelopes.map(|e| e.value),
+            mic_live: self.mic_live,
             t,
             phase_t,
             done,
@@ -1298,6 +1310,8 @@ struct AuraCanvas {
     skin_border: Option<(Color, f32)>,
     mode: Mode,
     level: f32,
+    bar_levels: [f32; 5],
+    mic_live: bool,
     t: f32,
     phase_t: f32,
     done: f32,
@@ -1335,6 +1349,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
         let r = self.radius;
         // How strong the ring and its bloom are, how wide, which way the colours run.
         let level = self.level;
+        let ring_level = level.powf(0.75);
         let (width, bloom, angle, alpha) = match self.mode {
             Mode::Idle => {
                 let breath = if self.reduced { 0.0 } else { aura::breath(self.t) };
@@ -1343,7 +1358,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
             Mode::Listening => {
                 // Snap in over 160 ms.
                 let snap = if self.reduced { 1.0 } else { aura::cubic_bezier(0.2, 0.9, 0.3, 1.0, self.phase_t / 0.160) };
-                (aura::stroke_width(level), aura::bloom(level) * snap, if self.reduced { 0.0 } else { self.t * 0.6 }, 0.45 + 0.55 * snap)
+                (aura::stroke_width(ring_level), aura::bloom(ring_level) * snap, if self.reduced { 0.0 } else { self.t * 0.6 }, 0.45 + 0.55 * snap)
             }
             Mode::Transcribing => (2.0, 0.25 + 0.4 * level, 0.0, 1.0),
             Mode::Thinking => (2.0, 0.30, if self.reduced { 0.0 } else { aura::sweep_angle(self.phase_t) }, 1.0),
@@ -1391,9 +1406,24 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
             let line = Path::line(Point::new(pill.x + inset, y), Point::new(pill.x + inset + full * left, y));
             frame.stroke(&line, Stroke { style: canvas::Style::Solid(color(self.accent.primary, 0.55)), width: 2.0, line_cap: canvas::LineCap::Round, ..Default::default() });
         }
-        // The state dot left of the field: listening grows with the voice, thinking spins.
+        // The state indicator left of the field: live 5-bar mic meter while listening, spinner
+        // while thinking, state dot otherwise.
         let dot = Point::new(pill.x + 22.0, pill.y + 26.0);
         match self.mode {
+            Mode::Listening => {
+                let heights = aura::mic_bar_heights(self.bar_levels, self.t, self.mic_live, self.reduced);
+                let bar_w = 2.6;
+                let pitch = 4.6;
+                let start_x = dot.x - 2.0 * pitch - bar_w / 2.0;
+                let alpha = if self.mic_live { 1.0 } else { 0.45 };
+                for (i, h) in heights.into_iter().enumerate() {
+                    let x = start_x + i as f32 * pitch;
+                    let rect = Rectangle::new(Point::new(x, dot.y - h / 2.0), Size::new(bar_w, h));
+                    // Shift towards the brighter peak colour as voice energy rises.
+                    let bar_rgb = if self.mic_live && self.bar_levels[i] > 0.25 { colors.peak } else { colors.primary };
+                    frame.fill(&rounded(rect, bar_w / 2.0), color(bar_rgb, alpha));
+                }
+            }
             Mode::Thinking if !self.reduced => {
                 let a = aura::sweep_angle(self.phase_t);
                 let arc = Path::new(|b| {
@@ -1403,7 +1433,7 @@ impl<Message> canvas::Program<Message, cosmic::Theme, cosmic::Renderer> for Aura
             }
             _ => {
                 let (radius, a) = match self.mode {
-                    Mode::Listening => (4.0 + 3.0 * level, 1.0),
+                    Mode::Listening => unreachable!(),
                     Mode::Transcribing | Mode::Thinking => (5.0, 0.9),
                     Mode::Speaking => (4.5 + 1.5 * if self.reduced { 0.5 } else { aura::speak_pulse(self.phase_t) }, 1.0),
                     Mode::Done | Mode::Error => (5.0, 1.0),
@@ -1463,6 +1493,9 @@ impl cosmic::Application for Overlay {
             last: crate::last::load(),
             envelope: Envelope::default(),
             target_level: 0.0,
+            bar_targets: [0.0; 5],
+            bar_envelopes: [Envelope::default(); 5],
+            mic_live: false,
             last_frame: now,
             phase_since: now,
             done_at: None,
@@ -1629,7 +1662,11 @@ impl cosmic::Application for Overlay {
                         Task::none()
                     }
                     VoiceEvent::Level(rms) => {
-                        self.target_level = aura::level_from_rms(rms);
+                        let lvl = aura::level_from_rms(rms);
+                        self.target_level = lvl;
+                        self.mic_live = true;
+                        self.bar_targets.rotate_left(1);
+                        self.bar_targets[4] = lvl;
                         Task::none()
                     }
                     VoiceEvent::Partial(text) => {
@@ -1639,6 +1676,8 @@ impl cosmic::Application for Overlay {
                     VoiceEvent::State(s) => {
                         if s != "listening" {
                             self.target_level = 0.0;
+                            self.bar_targets = [0.0; 5];
+                            self.mic_live = false;
                         }
                         self.handle(Event::VoiceState(s))
                     }
@@ -1646,6 +1685,8 @@ impl cosmic::Application for Overlay {
                         self.voice_on = None;
                         self.controls = None;
                         self.target_level = 0.0;
+                        self.bar_targets = [0.0; 5];
+                        self.mic_live = false;
                         // The machine still knows the session: it sends the question on.
                         self.handle(Event::VoiceFinal(text))
                     }
@@ -1658,6 +1699,8 @@ impl cosmic::Application for Overlay {
                         self.voice_on = None;
                         self.controls = None;
                         self.target_level = 0.0;
+                        self.bar_targets = [0.0; 5];
+                        self.mic_live = false;
                         self.handle(Event::VoiceClosed { reason, message })
                     }
                     VoiceEvent::Failed(message) => {
@@ -1810,6 +1853,9 @@ impl cosmic::Application for Overlay {
                 let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
                 self.envelope.step(self.target_level, dt);
+                for (env, &target) in self.bar_envelopes.iter_mut().zip(&self.bar_targets) {
+                    env.step(target, dt);
+                }
             }
             Message::LookTick => {
                 let fresh = settings::read();
