@@ -1,6 +1,6 @@
 [package]
 name = "maprisma-dictation"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license = "MIT"
 description = "Maprisma Dictation: a top-centre voice and typing overlay that asks the shared AI helper (COSMIC, KDE Plasma, Hyprland)"
@@ -29,7 +29,7 @@ tokio = { version = "1", features = ["process", "io-util", "time", "macros", "rt
 futures-util = "0.3"
 serde_json = "1"
 libc = "0.2"
-maprisma-kit = { git = "https://github.com/maprisma/maprisma-kit-rs", tag = "v0.1.0" }
+maprisma-kit = { git = "https://github.com/maprisma/maprisma-kit-rs", tag = "v0.2.0" }
 
 [dev-dependencies]
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }

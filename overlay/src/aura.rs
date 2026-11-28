@@ -109,35 +109,7 @@ pub fn aura_colors(accent: Rgb, dark: bool, tone: Tone) -> AuraColors {
     }
 }
 
-/// The microphone's RMS (0…1, linear) as a level 0…1 for the ring and mic meter: −50 dBFS and
-/// below is 0, −16 dBFS and above is 1 (desk-mic speech sits clearly in between).
-pub fn level_from_rms(rms: f64) -> f32 {
-    if !rms.is_finite() || rms <= 0.0 {
-        return 0.0;
-    }
-    let db = 20.0 * rms.log10();
-    ((db + 50.0) / 34.0).clamp(0.0, 1.0) as f32
-}
-
-/// Visual bar heights (px, 3…22) for the 5-bar live microphone meter left of the field while
-/// listening. `levels` holds the 5 smoothed recent chunks (0…1); `live` is true once the voice
-/// service has delivered audio chunks (after any USB mic warm-up guard).
-pub fn mic_bar_heights(levels: [f32; 5], t: f32, live: bool, reduced: bool) -> [f32; 5] {
-    const PROFILE: [f32; 5] = [0.62, 0.86, 1.0, 0.86, 0.62];
-    if !live {
-        return [3.0; 5];
-    }
-    let mut out = [3.0; 5];
-    for i in 0..5 {
-        let lvl = levels[i].clamp(0.0, 1.0);
-        // Gentle perceptual lift so modest desk-distance speech clearly animates the bars.
-        let shaped = lvl.powf(0.72);
-        let idle = if reduced { 0.35 } else { 0.5 + 0.5 * (2.0 * PI * 1.4 * t + i as f32 * 0.95).sin() };
-        let base = 3.5 + 1.8 * idle * (1.0 - shaped);
-        out[i] = (base + 17.5 * shaped * PROFILE[i]).clamp(3.0, 22.0);
-    }
-    out
-}
+pub use maprisma_kit::voice::{level_from_rms, mic_bar_heights};
 
 /// Attack 30 ms, release 130 ms.
 pub const ATTACK: f32 = 0.030;

@@ -401,6 +401,8 @@ impl Backend for CheckingBackend {
             noise_filter: crate::filter::NoiseFilterMode::Off,
             vad: None,
             hallucination_filter: false,
+            media_action: crate::media::MediaAction::Keep,
+            media_dirs: None,
         })
     }
     fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {

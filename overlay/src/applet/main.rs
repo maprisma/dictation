@@ -43,6 +43,7 @@ struct Applet {
     noise_filter: String,
     vad_sensitivity: String,
     hallucination_filter: bool,
+    media_during_dictation: String,
     popup: Option<window::Id>,
     /// The settings page is shown instead of the menu.
     settings_open: bool,
@@ -52,6 +53,7 @@ struct Applet {
     voice_language_open: bool,
     noise_filter_open: bool,
     vad_sensitivity_open: bool,
+    media_action_open: bool,
     setting_error: bool,
     rectangle: Rectangle,
     tracker: Option<RectangleTracker<u32>>,
@@ -73,6 +75,7 @@ enum Message {
     ToggleVoiceLanguage,
     ToggleNoiseFilter,
     ToggleVadSensitivity,
+    ToggleMediaAction,
     Language(String),
     Corners(String),
     SetSkin(String),
@@ -81,6 +84,7 @@ enum Message {
     SetNoiseFilter(String),
     SetVadSensitivity(String),
     SetHallucinationFilter(bool),
+    SetMediaAction(String),
     Shown(Shown),
     Tick,
     Escape(window::Id),
@@ -161,6 +165,7 @@ impl Applet {
         self.noise_filter = voice.noise_filter;
         self.vad_sensitivity = voice.vad_sensitivity;
         self.hallucination_filter = voice.hallucination_filter;
+        self.media_during_dictation = voice.media_during_dictation;
     }
 
     /// Saves one setting to the overlay's settings file, then reads them all again.
@@ -188,6 +193,7 @@ impl Applet {
         self.voice_language_open = false;
         self.noise_filter_open = false;
         self.vad_sensitivity_open = false;
+        self.media_action_open = false;
     }
 
     fn any_menu_open(&self) -> bool {
@@ -197,6 +203,7 @@ impl Applet {
             || self.voice_language_open
             || self.noise_filter_open
             || self.vad_sensitivity_open
+            || self.media_action_open
     }
 
     fn close_popup(&mut self) -> Task<Message> {
@@ -334,6 +341,19 @@ impl Applet {
             tr("Reject hallucinations"),
             cosmic::widget::toggler(self.hallucination_filter).on_toggle(Message::SetHallucinationFilter).into(),
         ));
+        let media_choices = [("keep", tr("Keep playing")), ("duck", tr("Lower volume")), ("pause", tr("Pause media"))];
+        let current_media = media_choices
+            .iter()
+            .find(|(c, _)| *c == self.media_during_dictation)
+            .map(|(_, l)| l.clone())
+            .unwrap_or_else(|| tr("Keep playing"));
+        page = page.push(setting(tr("While dictating"), choice(current_media, self.media_action_open, Message::ToggleMediaAction)));
+        if self.media_action_open {
+            for (code, label) in media_choices {
+                let label = if code == self.media_during_dictation { format!("✓ {label}") } else { label };
+                page = page.push(menu_button(text::body(label)).on_press(Message::SetMediaAction(code.into())));
+            }
+        }
         page = page.push(padded_control(divider::horizontal::default()));
         page = page.push(menu_button(text::body(tr("All Voice settings…"))).on_press(Message::Settings));
         if self.setting_error {
@@ -484,6 +504,11 @@ impl cosmic::Application for Applet {
                 self.close_settings_menus();
                 self.vad_sensitivity_open = next;
             }
+            Message::ToggleMediaAction => {
+                let next = !self.media_action_open;
+                self.close_settings_menus();
+                self.media_action_open = next;
+            }
             Message::Language(code) => {
                 self.language_open = false;
                 self.save("language", code.into());
@@ -512,6 +537,10 @@ impl cosmic::Application for Applet {
                 self.save_voice("vad_sensitivity", level.into());
             }
             Message::SetHallucinationFilter(on) => self.save_voice("hallucination_filter", on.into()),
+            Message::SetMediaAction(mode) => {
+                self.media_action_open = false;
+                self.save_voice("media_during_dictation", mode.into());
+            }
             Message::Closed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;

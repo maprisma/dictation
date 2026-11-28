@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 pub const ENGINES: [&str; 6] = ["auto", "whisper", "online", "voxtype", "superwhisper", "omarchy"];
 pub const NOISE_FILTERS: [&str; 3] = ["off", "standard", "strong"];
 pub const VAD_SENSITIVITIES: [&str; 3] = ["strict", "normal", "sensitive"];
+pub const MEDIA_DURING_DICTATION: [&str; 3] = ["keep", "duck", "pause"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -47,6 +48,8 @@ pub struct Settings {
     pub vad_sensitivity: String,
     /// Reject likely Whisper hallucinations on silence/noise (verbose_json thresholds + phantom phrases).
     pub hallucination_filter: bool,
+    /// One of [MEDIA_DURING_DICTATION]: what to do with playing streams while listening (`keep`, `duck`, `pause`).
+    pub media_during_dictation: String,
 }
 
 pub const SENSITIVITIES: [&str; 3] = ["strict", "normal", "loose"];
@@ -83,6 +86,7 @@ impl Default for Settings {
             noise_filter: "standard".into(),
             vad_sensitivity: "normal".into(),
             hallucination_filter: true,
+            media_during_dictation: "keep".into(),
         }
     }
 }
@@ -125,6 +129,7 @@ pub fn parse(value: &Value) -> Settings {
         noise_filter: text("noise_filter").filter(|f| NOISE_FILTERS.contains(f)).unwrap_or(&d.noise_filter).into(),
         vad_sensitivity: text("vad_sensitivity").filter(|s| VAD_SENSITIVITIES.contains(s)).unwrap_or(&d.vad_sensitivity).into(),
         hallucination_filter: value.get("hallucination_filter").and_then(Value::as_bool).unwrap_or(d.hallucination_filter),
+        media_during_dictation: text("media_during_dictation").filter(|m| MEDIA_DURING_DICTATION.contains(m)).unwrap_or(&d.media_during_dictation).into(),
     }
 }
 
@@ -150,6 +155,7 @@ pub fn check(key: &str, value: &Value) -> Result<(), String> {
         "wake_sensitivity" => value.as_str().is_some_and(|s| SENSITIVITIES.contains(&s)),
         "noise_filter" => value.as_str().is_some_and(|f| NOISE_FILTERS.contains(&f)),
         "vad_sensitivity" => value.as_str().is_some_and(|s| VAD_SENSITIVITIES.contains(&s)),
+        "media_during_dictation" => value.as_str().is_some_and(|m| MEDIA_DURING_DICTATION.contains(&m)),
         "unload_minutes" => value.as_u64().is_some_and(|m| m <= 1440),
         "engine" => value.as_str().is_some_and(|e| ENGINES.contains(&e)),
         "model" => value.as_str().is_some_and(|m| m.is_empty() || crate::models::valid_setting(m)),
@@ -317,5 +323,13 @@ mod tests {
         assert!(check("hallucination_filter", &json!(true)).is_ok());
         assert!(check("hallucination_filter", &json!(false)).is_ok());
         assert!(check("hallucination_filter", &json!("true")).is_err());
+        assert_eq!(d.media_during_dictation.as_str(), "keep");
+        for m in MEDIA_DURING_DICTATION {
+            assert!(check("media_during_dictation", &json!(m)).is_ok());
+            assert_eq!(parse(&json!({"media_during_dictation": m})).media_during_dictation, m);
+        }
+        assert!(check("media_during_dictation", &json!("mute")).is_err());
+        assert!(check("media_during_dictation", &json!(true)).is_err());
+        assert_eq!(parse(&json!({"media_during_dictation": "bogus"})).media_during_dictation, "keep");
     }
 }

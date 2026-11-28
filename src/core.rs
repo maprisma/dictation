@@ -114,6 +114,8 @@ pub struct Prepared {
     pub noise_filter: crate::filter::NoiseFilterMode,
     pub vad: Option<VadConfig>,
     pub hallucination_filter: bool,
+    pub media_action: crate::media::MediaAction,
+    pub media_dirs: Option<crate::paths::Dirs>,
 }
 
 pub trait Backend: Send + Sync + 'static {
@@ -422,6 +424,10 @@ impl Core {
     }
 
     async fn run_recorded(self: Arc<Self>, id: String, prepared: Prepared, end: End, mut capture: Capture, mut control: mpsc::UnboundedReceiver<Control>) {
+        let mut media = match &prepared.media_dirs {
+            Some(dirs) => crate::media::MediaGuard::acquire(prepared.media_action, dirs).await,
+            None => crate::media::MediaGuard::noop(),
+        };
         let started = Instant::now();
         let engine = prepared.engine.clone();
         let vad_cfg = prepared.vad.unwrap_or(self.vad);
@@ -506,9 +512,10 @@ impl Core {
                 },
             }
         };
-        // The microphone goes off now, before transcribing.
+        // The microphone goes off now, before transcribing — restore media immediately.
         (capture.stop)();
         drop(capture.chunks);
+        media.restore().await;
         if let Some(ack) = preempted {
             let _ = ack.send(true);
         }
@@ -576,6 +583,10 @@ impl Core {
     }
 
     async fn run_external(self: Arc<Self>, id: String, prepared: Prepared, mut control: mpsc::UnboundedReceiver<Control>) {
+        let mut media = match &prepared.media_dirs {
+            Some(dirs) => crate::media::MediaGuard::acquire(prepared.media_action, dirs).await,
+            None => crate::media::MediaGuard::noop(),
+        };
         let started = Instant::now();
         let engine = prepared.engine.clone();
         let mut preempted = None;
@@ -600,6 +611,7 @@ impl Core {
                 Err(again) => VoiceError::engine(format!("the recording could not be stopped: {}; {}", first.message, again.message)),
             });
         }
+        media.restore().await;
         if let Some(ack) = preempted {
             let _ = ack.send(stopped.is_ok());
         }
@@ -700,6 +712,8 @@ pub mod tests {
                 noise_filter: crate::filter::NoiseFilterMode::Off,
                 vad: None,
                 hallucination_filter: false,
+                media_action: crate::media::MediaAction::Keep,
+                media_dirs: None,
             })
         }
         fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
@@ -1089,6 +1103,8 @@ pub mod tests {
                 noise_filter: self.noise_filter,
                 vad: Some(VadConfig::for_sensitivity("normal")),
                 hallucination_filter: self.hallucination_filter,
+                media_action: crate::media::MediaAction::Keep,
+                media_dirs: None,
             })
         }
         fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
@@ -1156,5 +1172,98 @@ pub mod tests {
             assert!(fin.starts_with("Ja"), "expected transcription on call {expected_calls}, got {fin:?}");
             assert_eq!(engine.calls.load(Ordering::SeqCst), expected_calls);
         }
+    }
+
+    #[tokio::test]
+    async fn recorded_session_ducks_and_restores_media_volume() {
+        use crate::media::MediaAction;
+        use crate::paths::{Dirs, testdir::TestDir};
+
+        let t = TestDir::new("core-media-duck");
+        let state = t.path().join("vol");
+        std::fs::write(&state, "Volume: 0.80\n").unwrap();
+        let script = format!(
+            "#!/bin/sh\nSTATE='{}'\nif [ \"$1\" = get-volume ]; then cat \"$STATE\"; exit 0; fi\nif [ \"$1\" = set-volume ]; then printf 'Volume: %s\\n' \"$3\" > \"$STATE\"; exit 0; fi\n",
+            state.display()
+        );
+        let bin = t.script("wpctl", &script);
+        let dirs = Dirs::rooted(t.path(), bin.to_str().unwrap());
+
+        struct MediaBackend {
+            engine: Arc<FakeEngine>,
+            audio: Mutex<Vec<(Vec<i16>, bool)>>,
+            media_action: MediaAction,
+            media_dirs: Dirs,
+        }
+        impl Backend for MediaBackend {
+            fn prepare(&self, request: &SessionRequest) -> Result<Prepared, VoiceError> {
+                Ok(Prepared {
+                    engine: self.engine.clone(),
+                    language: request.language.clone().unwrap_or("auto".into()),
+                    microphone: "default".into(),
+                    noise_filter: crate::filter::NoiseFilterMode::Off,
+                    vad: None,
+                    hallucination_filter: false,
+                    media_action: self.media_action,
+                    media_dirs: Some(self.media_dirs.clone()),
+                })
+            }
+            fn capture(&self, _microphone: &str) -> Result<Capture, VoiceError> {
+                let mut audio = self.audio.lock().unwrap();
+                let (samples, more) = if audio.is_empty() { (vec![], true) } else { audio.remove(0) };
+                Ok(Capture::from_samples(samples, more))
+            }
+            fn status(&self) -> serde_json::Map<String, serde_json::Value> {
+                serde_json::Map::new()
+            }
+        }
+
+        let engine = Arc::new(FakeEngine::new("hello"));
+        let backend = Arc::new(MediaBackend {
+            engine: engine.clone(),
+            audio: Mutex::new(vec![(synth::tone(500, 220.0, 6000.0), true)]),
+            media_action: MediaAction::Duck,
+            media_dirs: dirs,
+        });
+        let (core, mut rx) = Core::new(backend, VadConfig::default());
+        let id = core.start_session(request("app", End::Release)).await.unwrap();
+
+        // Wait for 6 chunks (300 ms >= MIN_AUDIO_MS); receiving Level guarantees MediaGuard::acquire ran.
+        let mut level_count = 0usize;
+        while level_count < 6 {
+            let e = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("timed out").expect("channel closed");
+            if matches!(e, Event::Level { .. }) {
+                level_count += 1;
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), "Volume: 0.15", "volume must be ducked while listening");
+
+        core.finish(&id).unwrap();
+
+        let mut saw_transcribing = false;
+        let mut saw_final = false;
+        loop {
+            let e = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("timed out").expect("channel closed");
+            match e {
+                Event::State { id: ref i, state: "transcribing" } if i == &id => {
+                    saw_transcribing = true;
+                    assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), "Volume: 0.80", "volume must be restored before transcribing");
+                }
+                Event::Final { id: ref i, ref text, .. } if i == &id => {
+                    saw_final = true;
+                    assert!(text.starts_with("hello"), "unexpected final text: {text:?}");
+                    assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), "Volume: 0.80", "volume must be restored before Final");
+                }
+                Event::Closed { id: ref i, ref reason } if i == &id => {
+                    assert_eq!(reason, "finished");
+                    assert_eq!(std::fs::read_to_string(&state).unwrap().trim(), "Volume: 0.80", "volume must be restored before Closed");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_transcribing);
+        assert!(saw_final);
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
     }
 }

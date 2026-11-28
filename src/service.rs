@@ -77,6 +77,8 @@ impl Backend for RealBackend {
             noise_filter: crate::filter::NoiseFilterMode::parse(&s.noise_filter),
             vad: Some(crate::vad::VadConfig::for_sensitivity(&s.vad_sensitivity)),
             hallucination_filter: s.hallucination_filter,
+            media_action: crate::media::MediaAction::parse(&s.media_during_dictation),
+            media_dirs: Some(self.dirs.clone()),
         })
     }
 
@@ -120,6 +122,7 @@ pub fn status_map(s: &Settings, facts: &Facts) -> Map<String, Value> {
     m.insert("vad_sensitivity".into(), s.vad_sensitivity.clone().into());
     m.insert("hallucination_filter".into(), s.hallucination_filter.into());
     m.insert("hallucination_filter_active".into(), (s.hallucination_filter && matches!(choice, Ok(Choice::Whisper { .. } | Choice::Online(..)))).into());
+    m.insert("media_during_dictation".into(), s.media_during_dictation.clone().into());
     m
 }
 

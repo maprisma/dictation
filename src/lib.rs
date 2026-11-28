@@ -10,6 +10,7 @@ pub mod engines;
 pub mod filter;
 pub mod http;
 pub mod i18n;
+pub mod media;
 pub mod models;
 pub mod omarchy;
 pub mod paths;
